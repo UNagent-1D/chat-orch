@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use crate::error::AppError;
-use crate::gateway::acr_client::AgentConfig;
+use crate::gateway::acr_client::{AgentConfig, ToolRegistryEntry};
 use crate::llm::client::LlmClient;
 use crate::llm::tool_executor::ToolExecutor;
 use crate::llm::turn_loop;
@@ -29,6 +29,10 @@ use crate::types::session::Session;
 /// 3. Fetch data sources for tool execution
 /// 4. Run the LLM turn loop (may involve multiple tool calls)
 /// 5. Return the agent's response
+///
+/// The `tool_registry` parameter provides enriched tool definitions from
+/// the ACR's global tool registry. Pass an empty slice to fall back to
+/// the constraints-only behavior.
 pub async fn process_turn(
     llm_client: &Arc<dyn LlmClient>,
     tool_executor: &ToolExecutor,
@@ -36,6 +40,7 @@ pub async fn process_turn(
     agent_config: &AgentConfig,
     resolved: &ResolvedMessage,
     data_sources: &[crate::gateway::tenant_client::DataSource],
+    tool_registry: &[ToolRegistryEntry],
 ) -> Result<AgentResponse, AppError> {
     // Extract user text based on content type
     let user_text = extract_user_text(&resolved.content)?;
@@ -52,6 +57,7 @@ pub async fn process_turn(
         data_sources,
         &user_text,
         &history,
+        tool_registry,
     )
     .await?;
 

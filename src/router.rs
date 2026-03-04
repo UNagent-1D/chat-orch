@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
+use axum::{extract::State, http::StatusCode, middleware, routing::get, Json, Router};
 use tower_http::{
     catch_panic::CatchPanicLayer,
     limit::RequestBodyLimitLayer,
@@ -8,18 +8,28 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::auth::rest;
+use crate::auth::{api_key, rest};
 use crate::ingest::{telegram, whatsapp};
 use crate::state::AppState;
 
 /// Build the complete Axum router with all routes and middleware layers.
 pub fn build_router(state: AppState) -> Router {
+    // Internal metrics endpoint — protected by API key middleware.
+    // Nested in its own sub-router so the middleware only applies here.
+    // The sub-router must NOT call .with_state() — that happens on the outer router.
+    let metrics_router = Router::new()
+        .route("/metrics/pipeline", get(pipeline_metrics))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            api_key::api_key_middleware,
+        ));
+
     Router::new()
         // Health / readiness probes (no auth, no state needed for health)
         .route("/health", get(health))
         .route("/ready", get(ready))
-        // Pipeline metrics
-        .route("/metrics/pipeline", get(pipeline_metrics))
+        // Pipeline metrics (API key protected)
+        .merge(metrics_router)
         // Channel webhook handlers
         .merge(telegram::routes())
         .merge(whatsapp::routes())
@@ -57,6 +67,8 @@ async fn ready(State(state): State<AppState>) -> Result<&'static str, StatusCode
 }
 
 /// Pipeline metrics endpoint — useful for monitoring/autoscaling.
+///
+/// Protected by API key middleware (X-Api-Key header).
 async fn pipeline_metrics(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "pipeline_available_permits": state.pipeline.available_permits(),

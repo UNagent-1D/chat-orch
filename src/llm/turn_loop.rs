@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use crate::gateway::acr_client::AgentConfig;
+use crate::gateway::acr_client::{AgentConfig, ToolPermission, ToolRegistryEntry};
 use crate::gateway::tenant_client::DataSource;
 
 use super::client::{
@@ -11,15 +11,17 @@ use super::tool_executor::ToolExecutor;
 /// Prevents infinite loops if the LLM keeps requesting tools.
 const MAX_TOOL_ITERATIONS: usize = 10;
 
-/// Execute a full conversation turn: LLM call → optional tool calls → final answer.
+/// Execute a full conversation turn: LLM call -> optional tool calls -> final answer.
 ///
 /// This is the core loop described in the AGENTS.md:
 /// 1. Build messages (system prompt + user message)
 /// 2. Call LLM with tool definitions
-/// 3. If LLM returns tool_calls → execute them → append results → call LLM again
+/// 3. If LLM returns tool_calls -> execute them -> append results -> call LLM again
 /// 4. Repeat until LLM returns a text response or max iterations reached
 ///
-/// Returns the final text response from the LLM.
+/// The `tool_registry` parameter provides rich OpenAI function definitions from
+/// the ACR's global tool registry. If empty, falls back to constraints-based
+/// definitions (auto-generated descriptions + empty parameter schemas).
 pub async fn execute_turn(
     llm_client: &dyn LlmClient,
     tool_executor: &ToolExecutor,
@@ -27,9 +29,10 @@ pub async fn execute_turn(
     data_sources: &[DataSource],
     user_message: &str,
     conversation_history: &[ChatMessage],
+    tool_registry: &[ToolRegistryEntry],
 ) -> Result<String, AppError> {
-    // Build tool definitions from agent config
-    let tools = build_tool_definitions(agent_config);
+    // Build tool definitions from agent config + registry
+    let tools = build_tool_definitions(agent_config, tool_registry);
     let tools_ref: Option<&[ToolDefinition]> = if tools.is_empty() {
         None
     } else {
@@ -118,34 +121,101 @@ pub async fn execute_turn(
     )))
 }
 
-/// Build tool definitions for the LLM from the agent config's tool_permissions.
+/// Build tool definitions for the LLM from the agent config's tool_permissions,
+/// enriched with the global tool registry when available.
 ///
-/// Each tool permission entry specifies the tool name. The function schema
-/// (parameters) comes from the constraints field if present, or defaults
-/// to an empty object schema.
-fn build_tool_definitions(agent_config: &AgentConfig) -> Vec<ToolDefinition> {
+/// For each tool in `agent_config.tool_permissions`:
+/// 1. Look up the tool_name in the `tool_registry`
+/// 2. If found AND active -> use the registry's `openai_function_def`
+///    (validates that it has `name` and `parameters` fields)
+/// 3. If found but inactive -> skip (log warning, tool is disabled globally)
+/// 4. If found but `openai_function_def` is malformed -> fall back to constraints
+/// 5. If not found in registry -> fall back to constraints-based definition
+///
+/// The fallback generates auto-descriptions ("Execute the {name} operation")
+/// with empty parameter schemas. This is functional but less accurate for
+/// LLM tool calling.
+fn build_tool_definitions(
+    agent_config: &AgentConfig,
+    tool_registry: &[ToolRegistryEntry],
+) -> Vec<ToolDefinition> {
     agent_config
         .tool_permissions
         .iter()
-        .map(|tp| {
-            let parameters = if tp.constraints.is_null() || tp.constraints == serde_json::json!({})
-            {
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                })
-            } else {
-                tp.constraints.clone()
-            };
+        .filter_map(|tp| {
+            match tool_registry.iter().find(|r| r.tool_name == tp.tool_name) {
+                Some(entry) if entry.is_active => {
+                    // Validate that openai_function_def has required fields
+                    let func_def = &entry.openai_function_def;
+                    if func_def.get("name").is_none() || func_def.get("parameters").is_none() {
+                        tracing::warn!(
+                            tool = %tp.tool_name,
+                            "registry entry has malformed openai_function_def (missing name or parameters) \
+                             — falling back to constraints"
+                        );
+                        return Some(fallback_definition(tp));
+                    }
 
-            ToolDefinition {
-                tool_type: "function".to_string(),
-                function: FunctionDefinition {
-                    name: tp.tool_name.clone(),
-                    description: format!("Execute the {} operation", tp.tool_name),
-                    parameters,
-                },
+                    // Try to deserialize the registry's function definition
+                    match serde_json::from_value::<FunctionDefinition>(func_def.clone()) {
+                        Ok(function) => Some(ToolDefinition {
+                            tool_type: "function".to_string(),
+                            function,
+                        }),
+                        Err(e) => {
+                            tracing::warn!(
+                                tool = %tp.tool_name,
+                                error = %e,
+                                "failed to parse registry openai_function_def — falling back to constraints"
+                            );
+                            Some(fallback_definition(tp))
+                        }
+                    }
+                }
+                Some(_entry) => {
+                    // Tool exists in registry but is_active == false
+                    tracing::warn!(
+                        tool = %tp.tool_name,
+                        "tool exists in registry but is inactive — skipping"
+                    );
+                    None
+                }
+                None => {
+                    // Not in registry — use constraints-based fallback
+                    if !tool_registry.is_empty() {
+                        tracing::debug!(
+                            tool = %tp.tool_name,
+                            "tool not found in registry — using constraints-based definition"
+                        );
+                    }
+                    Some(fallback_definition(tp))
+                }
             }
         })
         .collect()
+}
+
+/// Build a fallback tool definition from the tool permission's constraints.
+///
+/// This is the original behavior before tool registry integration:
+/// - Description: "Execute the {tool_name} operation"
+/// - Parameters: from `constraints` if present, else empty object schema
+fn fallback_definition(tp: &ToolPermission) -> ToolDefinition {
+    let parameters = if tp.constraints.is_null() || tp.constraints == serde_json::json!({}) {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    } else {
+        tp.constraints.clone()
+    };
+
+    ToolDefinition {
+        tool_type: "function".to_string(),
+        function: FunctionDefinition {
+            name: tp.tool_name.clone(),
+            description: format!("Execute the {} operation", tp.tool_name),
+            parameters,
+        },
+    }
 }

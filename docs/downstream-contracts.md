@@ -14,9 +14,10 @@ Base URL: `TENANT_SERVICE_URL` env var (e.g., `http://localhost:3001`)
 
 ### 1.1 Resolve Channel (Internal) — CROSS-TEAM DEPENDENCY
 
-> **STATUS: 🔴 Not yet implemented by Go team.**
+> **STATUS: 🔴 Not yet implemented — v2.1 doc confirmed identical to v2.**
 > This endpoint is required for WhatsApp tenant resolution.
-> See the message sent to the Go team for details.
+> MVP uses static tenant map override (JSON env var `WHATSAPP_STATIC_TENANT_MAP`).
+> See `docs/go-team-blocker-escalation.md` for the formal escalation.
 
 ```
 GET /internal/resolve-channel?channel_type=whatsapp&channel_key=<phone_number_id>
@@ -152,6 +153,45 @@ GET /internal/channels/all?active=true
   }
 ]
 ```
+
+### 1.7 Tool Registry (via ACR)
+
+> **STATUS: 🟡 Defined in v2.1 spec (section 3.3) — availability TBD.**
+> The tool registry is a global catalog of tools with full OpenAI function
+> definitions. Our orchestrator fetches this to enrich LLM tool schemas.
+> Falls back gracefully to constraints-only behavior if unavailable.
+
+```
+GET /api/v1/tool-registry
+```
+
+**Response (200 OK):**
+```json
+[
+  {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "tool_name": "list_doctors",
+    "description": "List available doctors",
+    "openai_function_def": {
+      "name": "list_doctors",
+      "description": "List available doctors at the hospital",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "specialty": { "type": "string", "description": "Medical specialty" },
+          "location": { "type": "string", "description": "Hospital location" }
+        }
+      }
+    },
+    "is_active": true,
+    "version": 1
+  }
+]
+```
+
+**Cache strategy:** moka, TTL 5 min, max 1 entry (global singleton), `try_get_with` for thundering herd.
+On fetch failure: return empty list (graceful degradation to constraints-only tool definitions).
+Response body limited to 1MB to prevent OOM.
 
 ---
 

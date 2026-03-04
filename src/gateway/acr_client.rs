@@ -52,16 +52,42 @@ pub struct AgentConfig {
     pub activated_at: Option<String>,
 }
 
+/// A single entry from the global tool registry.
+///
+/// The tool registry is a global catalog (not per-tenant) maintained by the
+/// ACR service. Each entry contains the full OpenAI function-calling JSON
+/// schema, which is the authoritative source for tool definitions sent to the LLM.
+///
+/// Returned by `GET /api/v1/tool-registry`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolRegistryEntry {
+    pub id: Uuid,
+    pub tool_name: String,
+    pub description: String,
+    /// Full OpenAI function-calling definition (JSON object with `name`,
+    /// `description`, `parameters`). This is the source of truth for tool
+    /// schemas — it overrides the constraints-based fallback in turn_loop.rs.
+    pub openai_function_def: serde_json::Value,
+    pub is_active: bool,
+    pub version: i32,
+}
+
 /// HTTP client for the Agent Config Registry (Go + Gin).
 ///
 /// The ACR provides versioned runtime configuration for AI agents:
 /// LLM parameters, tool permissions, conversation policy, and
 /// channel formatting rules.
+///
+/// Also serves the global tool registry (not tenant-scoped).
 #[derive(Clone)]
 pub struct AcrClient {
     client: Client,
     base_url: String,
 }
+
+/// Maximum response body size for tool registry (1MB).
+/// Prevents OOM from unbounded responses.
+const MAX_TOOL_REGISTRY_RESPONSE_BYTES: usize = 1_048_576;
 
 impl AcrClient {
     /// Create a new ACR client.
@@ -113,5 +139,54 @@ impl AcrClient {
         resp.json()
             .await
             .map_err(|e| AppError::Downstream(format!("invalid agent config response: {e}")))
+    }
+
+    /// Get the global tool registry.
+    ///
+    /// Calls `GET /api/v1/tool-registry`.
+    ///
+    /// This is NOT tenant-scoped — the tool registry is a global catalog of
+    /// all available tools with their OpenAI function-calling definitions.
+    /// The method is named `get_global_tool_registry` to signal this clearly.
+    ///
+    /// Response body is limited to 1MB to prevent OOM from unbounded responses.
+    /// Only active tools (is_active == true) are returned.
+    pub async fn get_global_tool_registry(&self) -> Result<Vec<ToolRegistryEntry>, AppError> {
+        let url = format!("{}/api/v1/tool-registry", self.base_url);
+
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| AppError::Downstream(format!("ACR tool registry unreachable: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AppError::Downstream(format!(
+                "ACR tool registry returned {status}: {body}"
+            )));
+        }
+
+        // Enforce response size limit to prevent OOM
+        let body_bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| AppError::Downstream(format!("failed to read tool registry body: {e}")))?;
+
+        if body_bytes.len() > MAX_TOOL_REGISTRY_RESPONSE_BYTES {
+            return Err(AppError::Downstream(format!(
+                "tool registry response too large: {} bytes (max {})",
+                body_bytes.len(),
+                MAX_TOOL_REGISTRY_RESPONSE_BYTES
+            )));
+        }
+
+        let entries: Vec<ToolRegistryEntry> = serde_json::from_slice(&body_bytes)
+            .map_err(|e| AppError::Downstream(format!("invalid tool registry response: {e}")))?;
+
+        // Filter to active tools only
+        Ok(entries.into_iter().filter(|e| e.is_active).collect())
     }
 }

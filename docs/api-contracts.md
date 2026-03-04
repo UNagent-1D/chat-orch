@@ -8,6 +8,27 @@ These are consumed by webhook providers (Telegram, WhatsApp) and internal client
 
 ---
 
+## Authentication Model
+
+All endpoints in the Chat Orchestrator use one of four authentication mechanisms:
+
+| Endpoint | Auth Mechanism | Header / Method |
+|----------|---------------|-----------------|
+| `GET /health` | None | Kubernetes liveness probe |
+| `GET /ready` | None | Kubernetes readiness probe |
+| `GET /metrics/pipeline` | API Key | `X-Api-Key` header (constant-time comparison) |
+| `POST /webhook/telegram/:slug` | Signature | `X-Telegram-Bot-Api-Secret-Token` header |
+| `GET /webhook/whatsapp` | Verify Token | `hub.verify_token` query param |
+| `POST /webhook/whatsapp` | HMAC-SHA256 | `X-Hub-Signature-256` header |
+| `POST /conversation/entrypoint/open` | JWT | `Authorization: Bearer <token>` |
+| `POST /conversation/chat/turn` | JWT | `Authorization: Bearer <token>` |
+
+**Fail-closed behavior:** If `METRICS_API_KEY` is not configured, the
+`/metrics/pipeline` endpoint returns 403 (not 200). This ensures forgetting
+to set the env var never exposes internal metrics.
+
+---
+
 ## 1. Webhook Endpoints (Channel Ingestion)
 
 These endpoints receive messages from external chat platforms. They use
@@ -250,3 +271,28 @@ Checks: Redis connectivity, downstream service reachability.
 ```
 
 **Response (503):** If any dependency is unreachable.
+
+### 3.3 Pipeline Metrics
+
+```
+GET /metrics/pipeline
+X-Api-Key: <METRICS_API_KEY>
+```
+
+Returns pipeline and cache metrics for monitoring/autoscaling.
+**Requires `X-Api-Key` header** matching the `METRICS_API_KEY` env var.
+
+**Response (200 OK):**
+```json
+{
+  "pipeline_available_permits": 9850,
+  "channel_cache_entries": 42,
+  "config_cache_entries": 12
+}
+```
+
+**Errors:**
+| Status | Meaning |
+|--------|---------|
+| 401 | `X-Api-Key` header missing |
+| 403 | Key mismatch or `METRICS_API_KEY` not configured |

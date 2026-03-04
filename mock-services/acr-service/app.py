@@ -2,6 +2,7 @@
 
 Provides:
 - GET /api/v1/tenants/:tid/profiles/:pid/configs/active — active agent config
+- GET /api/v1/tool-registry — global tool registry with OpenAI function definitions
 """
 
 import os
@@ -68,6 +69,14 @@ AGENT_CONFIG = {
                 "required": ["doctor_id", "patient_name", "date", "time"],
             },
         },
+        {
+            "tool_name": "reschedule_appointment",
+            "constraints": {},
+        },
+        {
+            "tool_name": "cancel_appointment",
+            "constraints": {},
+        },
     ],
     "llm_params": {
         "model": "gpt-4o",
@@ -89,6 +98,147 @@ AGENT_CONFIG = {
     "activated_at": "2026-03-01T00:00:00Z",
 }
 
+# Global tool registry with full OpenAI function-calling definitions.
+# These provide richer schemas than the constraints-only fallback.
+TOOL_REGISTRY = [
+    {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "tool_name": "list_doctors",
+        "description": "List available doctors, optionally filtered by specialty and location.",
+        "openai_function_def": {
+            "name": "list_doctors",
+            "description": "List available doctors at the hospital. Can filter by medical specialty and location.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "specialty": {
+                        "type": "string",
+                        "description": "Medical specialty to filter by (e.g., cardiology, pediatrics, general)",
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Hospital location to filter by (e.g., bogota-norte, medellin-centro)",
+                    },
+                },
+            },
+        },
+        "is_active": True,
+        "version": 1,
+    },
+    {
+        "id": "00000000-0000-0000-0000-000000000002",
+        "tool_name": "get_doctor_schedule",
+        "description": "Get available appointment slots for a specific doctor.",
+        "openai_function_def": {
+            "name": "get_doctor_schedule",
+            "description": "Get the available appointment slots for a specific doctor on a given date.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doctor_id": {
+                        "type": "string",
+                        "description": "The UUID of the doctor",
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Date to check availability (YYYY-MM-DD format)",
+                    },
+                },
+                "required": ["doctor_id"],
+            },
+        },
+        "is_active": True,
+        "version": 1,
+    },
+    {
+        "id": "00000000-0000-0000-0000-000000000003",
+        "tool_name": "book_appointment",
+        "description": "Book a new appointment with a doctor.",
+        "openai_function_def": {
+            "name": "book_appointment",
+            "description": "Book a new appointment with a doctor at the hospital. Requires patient name, doctor, date and time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doctor_id": {
+                        "type": "string",
+                        "description": "The UUID of the doctor to book with",
+                    },
+                    "patient_name": {
+                        "type": "string",
+                        "description": "Full name of the patient",
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Appointment date (YYYY-MM-DD format)",
+                    },
+                    "time": {
+                        "type": "string",
+                        "description": "Appointment time (HH:MM format, 24-hour)",
+                    },
+                },
+                "required": ["doctor_id", "patient_name", "date", "time"],
+            },
+        },
+        "is_active": True,
+        "version": 1,
+    },
+    {
+        "id": "00000000-0000-0000-0000-000000000004",
+        "tool_name": "reschedule_appointment",
+        "description": "Reschedule an existing appointment to a new date and time.",
+        "openai_function_def": {
+            "name": "reschedule_appointment",
+            "description": "Reschedule an existing appointment to a new date and/or time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "appointment_id": {
+                        "type": "string",
+                        "description": "The UUID of the appointment to reschedule",
+                    },
+                    "new_date": {
+                        "type": "string",
+                        "description": "New appointment date (YYYY-MM-DD format)",
+                    },
+                    "new_time": {
+                        "type": "string",
+                        "description": "New appointment time (HH:MM format, 24-hour)",
+                    },
+                },
+                "required": ["appointment_id"],
+            },
+        },
+        "is_active": True,
+        "version": 1,
+    },
+    {
+        "id": "00000000-0000-0000-0000-000000000005",
+        "tool_name": "cancel_appointment",
+        "description": "Cancel an existing appointment.",
+        "openai_function_def": {
+            "name": "cancel_appointment",
+            "description": "Cancel an existing appointment. This action cannot be undone.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "appointment_id": {
+                        "type": "string",
+                        "description": "The UUID of the appointment to cancel",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Optional reason for cancellation",
+                    },
+                },
+                "required": ["appointment_id"],
+            },
+        },
+        "is_active": True,
+        "version": 1,
+    },
+]
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -96,6 +246,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if "/configs/active" in parsed.path:
             self._json(200, AGENT_CONFIG)
+        elif parsed.path == "/api/v1/tool-registry":
+            self._json(200, TOOL_REGISTRY)
         elif parsed.path == "/health":
             self._json(200, {"status": "ok"})
         else:

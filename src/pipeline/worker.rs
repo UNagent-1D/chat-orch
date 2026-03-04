@@ -69,9 +69,9 @@ impl Pipeline {
 /// Process a single message through the full pipeline.
 ///
 /// This runs inside a spawned tokio task:
-/// 1. Resolve tenant from channel_key (via cache → Tenant Service)
+/// 1. Resolve tenant from channel_key (via cache -> Tenant Service)
 /// 2. Get/create session (Redis)
-/// 3. Fetch agent config (via cache → ACR)
+/// 3. Fetch agent config (via cache -> ACR)
 /// 4. Handle message routing (silent, fallback, or LLM)
 /// 5. Process conversation turn (LLM + tool calls) if applicable
 /// 6. Send reply back to originating channel
@@ -85,7 +85,7 @@ async fn process_message(app: &AppState, msg: IngestMessage) -> Result<(), AppEr
         .resolve(&channel_key, &app.tenant_client)
         .await?;
 
-    // 2. TypeState transition: IngestMessage → ResolvedMessage
+    // 2. TypeState transition: IngestMessage -> ResolvedMessage
     let resolved = msg.resolve((*tenant).clone());
 
     // 3. Check message type routing BEFORE session creation
@@ -145,6 +145,12 @@ async fn process_message(app: &AppState, msg: IngestMessage) -> Result<(), AppEr
             .await
             .unwrap_or_default();
 
+        // Fetch tool registry for enriched tool definitions (graceful degradation)
+        let tool_registry = app
+            .tool_registry_cache
+            .resolve(&app.acr_client)
+            .await;
+
         let response = conversation::process_turn(
             &app.llm_client,
             &app.tool_executor,
@@ -152,6 +158,7 @@ async fn process_message(app: &AppState, msg: IngestMessage) -> Result<(), AppEr
             &agent_config,
             &resolved,
             &data_sources,
+            &tool_registry,
         )
         .await?;
 

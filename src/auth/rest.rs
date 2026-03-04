@@ -35,7 +35,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .layer(middleware::from_fn_with_state(state, jwt_middleware))
 }
 
-// ─── Request / Response types ─────────────────────────────────────────
+// --- Request / Response types -----------------------------------------------
 
 #[derive(Debug, Deserialize)]
 struct OpenEntrypointRequest {
@@ -68,7 +68,7 @@ struct ChatTurnResponse {
     conversation_id: Uuid,
 }
 
-// ─── Handlers ─────────────────────────────────────────────────────────
+// --- Handlers ---------------------------------------------------------------
 
 /// POST /conversation/entrypoint/open
 ///
@@ -170,6 +170,12 @@ async fn chat_turn(
         .await
         .unwrap_or_default();
 
+    // Fetch tool registry for enriched tool definitions (graceful degradation)
+    let tool_registry = state
+        .tool_registry_cache
+        .resolve(&state.acr_client)
+        .await;
+
     // Build a synthetic ResolvedMessage for the conversation logic
     let resolved = ResolvedMessage {
         id: Uuid::new_v4().to_string(),
@@ -195,6 +201,7 @@ async fn chat_turn(
         &agent_config,
         &resolved,
         &data_sources,
+        &tool_registry,
     )
     .await?;
 

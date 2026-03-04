@@ -29,6 +29,9 @@ async fn main() -> Result<()> {
     let config = config::AppConfig::from_env()?;
     let addr = format!("{}:{}", config.server_host, config.server_port);
 
+    // Startup warnings for auth and resolution configuration
+    log_startup_warnings(&config);
+
     // Build application state (caches, clients, semaphore, Redis pools)
     let state = state::AppState::new(config).await?;
 
@@ -45,6 +48,29 @@ async fn main() -> Result<()> {
 
     tracing::info!("shutdown complete");
     Ok(())
+}
+
+/// Log startup warnings about configuration state.
+fn log_startup_warnings(config: &config::AppConfig) {
+    // Metrics API key
+    if config.metrics_api_key.is_none() {
+        tracing::warn!(
+            "METRICS_API_KEY not set — /metrics/pipeline endpoint is disabled (returns 403)"
+        );
+    }
+
+    // WhatsApp static tenant map
+    if config.whatsapp_static_tenant_map.is_some() {
+        tracing::warn!(
+            "WHATSAPP_STATIC_TENANT_MAP is configured — using static tenant overrides. \
+             This is an MVP workaround until the Go team delivers GET /internal/resolve-channel"
+        );
+    } else {
+        tracing::info!(
+            "no static tenant map configured — WhatsApp tenant resolution \
+             depends on Tenant Service GET /internal/resolve-channel"
+        );
+    }
 }
 
 async fn shutdown_signal() {

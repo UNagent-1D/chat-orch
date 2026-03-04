@@ -49,6 +49,12 @@ pub struct AppConfig {
 
     // Observability
     pub log_format: String,
+
+    // Internal endpoint auth
+    pub metrics_api_key: Option<String>,
+
+    // WhatsApp static tenant map (MVP workaround)
+    pub whatsapp_static_tenant_map: Option<String>,
 }
 
 impl AppConfig {
@@ -102,6 +108,13 @@ impl AppConfig {
 
             // Observability
             log_format: env_or("LOG_FORMAT", "pretty"),
+
+            // Internal endpoint auth (fail-closed: 403 if not configured)
+            metrics_api_key: env_opt("METRICS_API_KEY"),
+
+            // WhatsApp static tenant map (MVP workaround — JSON array)
+            // Format: [{"phone_number_id":"...","tenant_id":"...","tenant_slug":"...","agent_profile_id":"..."}]
+            whatsapp_static_tenant_map: env_opt("WHATSAPP_STATIC_TENANT_MAP"),
         })
     }
 }

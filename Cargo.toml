@@ -10,7 +10,7 @@ license = "MIT"
 # Web framework
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
-tower = "0.4"
+tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = [
     "trace",
     "timeout",
@@ -42,10 +42,11 @@ dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-# Crypto (webhook signature verification)
+# Crypto (webhook signature verification + constant-time comparison)
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+subtle = "2"
 
 # JWT (REST endpoint authentication)
 jsonwebtoken = "9"
@@ -68,6 +69,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 wiremock = "0.6"
 tokio-test = "0.4"
 criterion = { version = "0.5", features = ["async_tokio"] }
+http-body-util = "0.1"
 
 [[bench]]
 name = "throughput"
