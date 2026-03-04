@@ -229,6 +229,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dotenvy",
+ "futures",
  "hex",
  "hmac",
  "jsonwebtoken",

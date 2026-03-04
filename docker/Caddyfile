@@ -1,0 +1,22 @@
+# Caddy reverse proxy for local development with TLS.
+#
+# Telegram webhooks require HTTPS. Caddy automatically provisions
+# TLS certificates (self-signed for localhost, Let's Encrypt for domains).
+#
+# Usage:
+#   docker compose up caddy
+#   Set Telegram webhook URL to https://localhost:443/webhook/telegram/<slug>
+
+:443 {
+    tls internal
+
+    reverse_proxy chat-orch:3000 {
+        health_uri /health
+        health_interval 10s
+    }
+
+    log {
+        output stdout
+        format console
+    }
+}

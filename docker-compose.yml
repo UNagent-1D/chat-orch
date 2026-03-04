@@ -1,0 +1,96 @@
+# Docker Compose for local development and integration testing.
+#
+# Services:
+#   chat-orch      — the Rust orchestrator (builds from Dockerfile)
+#   redis          — session store + dedup
+#   caddy          — TLS reverse proxy (for Telegram webhooks)
+#   tenant-mock    — Python mock of Go Tenant Service
+#   acr-mock       — Python mock of Go Agent Config Registry
+#   graph-mock     — Python mock of WhatsApp Graph API + Telegram Bot API + Hospital API
+#
+# Usage:
+#   docker compose up --build        # Start everything
+#   docker compose up redis          # Just Redis (for cargo run locally)
+#   docker compose logs -f chat-orch # Follow orchestrator logs
+
+services:
+  chat-orch:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "3000:3000"
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      TENANT_SERVICE_URL: http://tenant-mock:3001
+      ACR_SERVICE_URL: http://acr-mock:3002
+    depends_on:
+      redis:
+        condition: service_healthy
+      tenant-mock:
+        condition: service_started
+      acr-mock:
+        condition: service_started
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis-data:/data
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - chat-orch
+
+  tenant-mock:
+    image: python:3.12-slim
+    working_dir: /app
+    command: python app.py
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./mock-services/tenant-service:/app:ro
+    environment:
+      PORT: "3001"
+
+  acr-mock:
+    image: python:3.12-slim
+    working_dir: /app
+    command: python app.py
+    ports:
+      - "3002:3002"
+    volumes:
+      - ./mock-services/acr-service:/app:ro
+    environment:
+      PORT: "3002"
+
+  graph-mock:
+    image: python:3.12-slim
+    working_dir: /app
+    command: python app.py
+    ports:
+      - "3003:3003"
+    volumes:
+      - ./mock-services/graph-api:/app:ro
+    environment:
+      PORT: "3003"
+
+volumes:
+  redis-data:
+  caddy-data:
+  caddy-config:

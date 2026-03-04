@@ -54,8 +54,9 @@ jsonwebtoken = "9"
 thiserror = "1"
 anyhow = "1"
 
-# Async traits
+# Async utilities
 async-trait = "0.1"
+futures = "0.3"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
