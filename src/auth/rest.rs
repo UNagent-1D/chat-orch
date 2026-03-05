@@ -32,7 +32,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/conversation/entrypoint/open", post(open_entrypoint))
         .route("/conversation/chat/turn", post(chat_turn))
-        .layer(middleware::from_fn_with_state(state, jwt_middleware))
+        .route_layer(middleware::from_fn_with_state(state, jwt_middleware))
 }
 
 // --- Request / Response types -----------------------------------------------

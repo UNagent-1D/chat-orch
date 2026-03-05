@@ -3,6 +3,7 @@ use std::time::Duration;
 use axum::{extract::State, http::StatusCode, middleware, routing::get, Json, Router};
 use tower_http::{
     catch_panic::CatchPanicLayer,
+    cors::{Any, CorsLayer},
     limit::RequestBodyLimitLayer,
     timeout::TimeoutLayer,
     trace::TraceLayer,
@@ -15,11 +16,11 @@ use crate::state::AppState;
 /// Build the complete Axum router with all routes and middleware layers.
 pub fn build_router(state: AppState) -> Router {
     // Internal metrics endpoint — protected by API key middleware.
-    // Nested in its own sub-router so the middleware only applies here.
-    // The sub-router must NOT call .with_state() — that happens on the outer router.
+    // Uses route_layer so middleware only applies to matched routes,
+    // preventing it from leaking to other routes when merged.
     let metrics_router = Router::new()
         .route("/metrics/pipeline", get(pipeline_metrics))
-        .layer(middleware::from_fn_with_state(
+        .route_layer(middleware::from_fn_with_state(
             state.clone(),
             api_key::api_key_middleware,
         ));
@@ -40,6 +41,12 @@ pub fn build_router(state: AppState) -> Router {
         .layer(CatchPanicLayer::new())
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1MB max body
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

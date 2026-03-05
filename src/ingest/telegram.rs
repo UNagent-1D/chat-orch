@@ -28,7 +28,7 @@ use super::telegram_types::{TelegramMessage, TelegramUpdate};
 
 /// Build the Telegram webhook routes.
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/webhook/telegram/{tenant_slug}", post(handle_webhook))
+    Router::new().route("/webhook/telegram/:tenant_slug", post(handle_webhook))
 }
 
 /// Handle incoming Telegram webhook updates.

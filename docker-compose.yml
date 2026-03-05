@@ -4,6 +4,7 @@
 #   chat-orch      — the Rust orchestrator (builds from Dockerfile)
 #   redis          — session store + dedup
 #   caddy          — TLS reverse proxy (for Telegram webhooks)
+#   swagger-ui     — interactive API docs (http://localhost:8080)
 #   tenant-mock    — Python mock of Go Tenant Service
 #   acr-mock       — Python mock of Go Agent Config Registry
 #   graph-mock     — Python mock of WhatsApp Graph API + Telegram Bot API + Hospital API
@@ -12,6 +13,7 @@
 #   docker compose up --build        # Start everything
 #   docker compose up redis          # Just Redis (for cargo run locally)
 #   docker compose logs -f chat-orch # Follow orchestrator logs
+#   open http://localhost:8080       # Swagger UI
 
 services:
   chat-orch:
@@ -45,6 +47,17 @@ services:
       retries: 5
     volumes:
       - redis-data:/data
+
+  swagger-ui:
+    image: swaggerapi/swagger-ui:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./docs/openapi.yaml:/app/openapi.yaml:ro
+    environment:
+      SWAGGER_JSON: /app/openapi.yaml
+    depends_on:
+      - chat-orch
 
   caddy:
     image: caddy:2-alpine

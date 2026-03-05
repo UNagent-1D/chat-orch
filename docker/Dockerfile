@@ -4,31 +4,21 @@
 # Stage 2: Builder — compile dependencies (cached) then compile app
 # Stage 3: Runtime — minimal image with only the binary
 
-# ── Stage 1: Planner ─────────────────────────────────────────────────
-FROM rust:1.82-slim AS planner
+# ── Stage 1: Builder ─────────────────────────────────────────────────
+FROM rust:1.88-slim AS builder
 WORKDIR /app
-
-RUN cargo install cargo-chef --locked
-COPY Cargo.toml Cargo.lock ./
-COPY src/ ./src/
-RUN cargo chef prepare --recipe-path recipe.json
-
-# ── Stage 2: Builder ─────────────────────────────────────────────────
-FROM rust:1.82-slim AS builder
-WORKDIR /app
-
-RUN cargo install cargo-chef --locked
 
 # Install build deps for crypto crates
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
-# Cook dependencies (cached layer)
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
-
-# Copy source and build
+# Cache dependency build: copy manifests first, build with a dummy main
 COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src benches && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs && echo 'fn main() {}' > benches/throughput.rs
+RUN cargo build --release && rm -rf src benches target/release/deps/chat_orch*
+
+# Copy real source and build
 COPY src/ ./src/
+COPY benches/ ./benches/
 RUN cargo build --release
 
 # ── Stage 3: Runtime ─────────────────────────────────────────────────
