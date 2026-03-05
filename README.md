@@ -78,6 +78,18 @@ for the Tenant Service, Agent Config Registry, and channel APIs.
 | `/conversation/entrypoint/open` | POST | JWT Bearer | Open a new conversation session |
 | `/conversation/chat/turn` | POST | JWT Bearer | Execute a conversation turn (synchronous) |
 
+### Interactive API Docs (Swagger)
+
+Full OpenAPI 3.0.3 spec is at [`docs/openapi.yaml`](docs/openapi.yaml). To browse it interactively:
+
+```bash
+# Option A: Swagger UI via Docker
+docker run -p 8080:8080 -e SWAGGER_JSON=/spec/openapi.yaml \
+  -v ./docs:/spec swaggerapi/swagger-ui
+
+# Option B: Paste into https://editor.swagger.io
+```
+
 ## Project Structure
 
 ```

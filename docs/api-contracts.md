@@ -1,10 +1,15 @@
 # API Contracts — Chat Orchestrator (Exposed Endpoints)
 
-*Version 1.0 | March 2026*
+*Version 1.1 | March 2026*
 
 This document defines the REST API endpoints that the Chat Orchestrator exposes.
 These are consumed by webhook providers (Telegram, WhatsApp) and internal clients
 (web widget, admin tools).
+
+> **Full API reference:** See [`openapi.yaml`](./openapi.yaml) for the complete
+> OpenAPI 3.0.3 specification with request/response schemas, examples, and
+> security definitions. Load it in [Swagger UI](https://swagger.io/tools/swagger-ui/)
+> or [Redoc](https://redocly.com/redoc) for interactive docs.
 
 ---
 
@@ -154,22 +159,24 @@ Content-Type: application/json
 **Request:**
 ```json
 {
-  "tenant_id": "550e8400-e29b-41d4-a716-446655440000",
-  "channel": "web_widget",
-  "channel_user_id": "user-session-abc123"
+  "agent_profile_id": "770e8400-e29b-41d4-a716-446655440002",
+  "session_token": "ses_abc123def456..."
 }
 ```
 
-**Response (201 Created):**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `agent_profile_id` | UUID | Yes | Which agent profile to use |
+| `session_token` | string | No | Resume an existing session (creates new if expired/missing) |
+
+> **Note:** `tenant_id` comes from JWT claims, not the request body.
+
+**Response (200 OK):**
 ```json
 {
+  "session_token": "ses_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
   "conversation_id": "660e8400-e29b-41d4-a716-446655440001",
-  "session_token": "ses_abc123def456...",
-  "config_refs": {
-    "agent_profile_id": "770e8400-e29b-41d4-a716-446655440002",
-    "agent_config_id": "880e8400-e29b-41d4-a716-446655440003",
-    "config_version": 3
-  }
+  "tenant_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
@@ -178,8 +185,7 @@ Content-Type: application/json
 |--------|---------|
 | 400 | Missing or invalid fields |
 | 401 | Missing or invalid JWT |
-| 403 | JWT role insufficient or wrong tenant scope |
-| 404 | Tenant not found or inactive |
+| 500 | Session creation failed (Redis error) |
 
 ### 2.2 Chat Turn
 
@@ -192,49 +198,41 @@ Content-Type: application/json
 **Request:**
 ```json
 {
-  "conversation_id": "660e8400-e29b-41d4-a716-446655440001",
-  "session_token": "ses_abc123def456...",
-  "tenant_id": "550e8400-e29b-41d4-a716-446655440000",
-  "config_refs": {
-    "agent_profile_id": "770e8400-e29b-41d4-a716-446655440002",
-    "agent_config_id": "880e8400-e29b-41d4-a716-446655440003",
-    "config_version": 3
-  },
-  "message": {
-    "content_type": "text",
-    "text": "I need to book an appointment with a cardiologist"
-  }
+  "session_token": "ses_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+  "message": "I need to book an appointment with a cardiologist"
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `session_token` | string | Yes | Session token from `/conversation/entrypoint/open` |
+| `message` | string | Yes | The user's message text |
+
+> **Note:** `tenant_id` and `config_refs` are resolved server-side from the
+> session and JWT claims. Only `session_token` + `message` are needed.
 
 **Response (200 OK):**
 ```json
 {
-  "reply": {
-    "parts": [
-      {
-        "type": "text",
-        "text": "I can help you schedule a cardiology appointment. Let me check available doctors."
-      },
-      {
-        "type": "quick_replies",
-        "prompt": "Which location works best for you?",
-        "options": [
-          { "label": "Bogota Norte", "value": "bogota-norte" },
-          { "label": "Medellin Centro", "value": "medellin-centro" }
-        ]
-      }
-    ]
-  },
-  "updated_session_token": null
+  "reply": "I can help you schedule a cardiology appointment. Let me check available doctors and time slots.",
+  "conversation_id": "660e8400-e29b-41d4-a716-446655440001"
 }
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reply` | string | Agent's text reply (concatenated text parts, joined by `\n`) |
+| `conversation_id` | UUID | Conversation ID for reference/logging |
+
+> **Note:** Rich response parts (quick replies, interactive menus, media) are only
+> delivered via channel APIs (Telegram, WhatsApp), not in the REST response.
 
 **Errors:**
 | Status | Meaning |
 |--------|---------|
 | 400 | Invalid message format |
 | 401 | Missing or invalid JWT |
+| 403 | Session belongs to different tenant than JWT |
 | 404 | Session not found or expired |
 | 502 | Downstream service (LLM, Tenant, ACR) error |
 
@@ -257,20 +255,12 @@ No auth required.
 GET /ready
 ```
 
-Returns `200 OK` if the server is ready to accept traffic.
-Checks: Redis connectivity, downstream service reachability.
+Returns `200 OK` with body `"ok"` (plain text) if the server is ready to accept traffic.
+Currently checks **Redis connectivity** via `PING`.
 
-**Response (200 OK):**
-```json
-{
-  "status": "ok",
-  "redis": "ok",
-  "tenant_service": "ok",
-  "acr_service": "ok"
-}
-```
+**Response (200 OK):** `ok` (plain text)
 
-**Response (503):** If any dependency is unreachable.
+**Response (503):** Empty body — Redis is unreachable.
 
 ### 3.3 Pipeline Metrics
 
