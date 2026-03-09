@@ -25,8 +25,8 @@ RUN cargo build --release
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 
-# Install CA certificates for HTTPS calls to external APIs
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+# Install CA certificates for HTTPS calls to external APIs + curl for healthcheck
+RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/chat-orch /app/chat-orch
 
@@ -37,6 +37,6 @@ USER appuser
 EXPOSE 3000
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
-    CMD ["/app/chat-orch", "--health-check"] || exit 1
+    CMD curl -f http://localhost:3000/health || exit 1
 
 ENTRYPOINT ["/app/chat-orch"]

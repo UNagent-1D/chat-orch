@@ -66,7 +66,7 @@ DATA_SOURCES = [
         "id": "990e8400-e29b-41d4-a716-446655440004",
         "name": "Hospital Mock API",
         "source_type": "rest_api",
-        "base_url": "http://host.docker.internal:3003",
+        "base_url": "http://graph-mock:3003",
         "credential_ref": None,
         "route_configs": {
             "list_doctors": {
@@ -107,12 +107,19 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path.startswith("/api/v1/tenants/") and parsed.path.endswith(
             "/profiles"
         ):
-            self._json(200, PROFILES)
+            self._json(200, {"data": PROFILES})
 
         elif parsed.path.startswith("/api/v1/tenants/") and parsed.path.endswith(
             "/data-sources"
         ):
-            self._json(200, DATA_SOURCES)
+            self._json(200, {"data": DATA_SOURCES})
+
+        elif (
+            parsed.path.startswith("/api/v1/tenants/")
+            and "/end-users/lookup/phone/" in parsed.path
+        ):
+            # End-user lookup by phone — return "not found" for unknown numbers
+            self._json(200, {"exists": False})
 
         elif parsed.path.startswith("/api/v1/tenants/"):
             self._json(200, TENANT)

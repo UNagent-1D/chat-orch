@@ -79,7 +79,7 @@ AGENT_CONFIG = {
         },
     ],
     "llm_params": {
-        "model": "gpt-4o",
+        "model": "qwen2.5:7b",
         "temperature": 0.3,
         "max_tokens": 1024,
         "system_prompt": (

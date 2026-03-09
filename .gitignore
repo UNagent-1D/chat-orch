@@ -20,6 +20,9 @@ target/
 docker-data/
 redis-data/
 
+# Cloned Go microservices (not submodules — see scripts/clone-services.sh)
+.dev/
+
 # IDE
 .idea/
 .vscode/

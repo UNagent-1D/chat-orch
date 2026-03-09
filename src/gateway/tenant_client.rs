@@ -5,6 +5,13 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::types::ingest_message::{ChannelLookupKey, TenantResolution};
 
+/// Generic wrapper for paginated/listed responses from the Tenant Service.
+/// The Go Tenant Service (and conversation-chat) wrap arrays as `{"data": [...]}`.
+#[derive(Debug, Deserialize)]
+struct DataWrapper<T> {
+    data: Vec<T>,
+}
+
 /// Response from `GET /internal/resolve-channel`.
 #[derive(Debug, Deserialize)]
 struct ResolveChannelResponse {
@@ -157,6 +164,7 @@ impl TenantClient {
     /// Get agent profiles for a tenant.
     ///
     /// Calls `GET /api/v1/tenants/:id/profiles`.
+    /// Response format: `{"data": [...]}`
     pub async fn get_profiles(&self, tenant_id: Uuid) -> Result<Vec<AgentProfile>, AppError> {
         let url = format!("{}/api/v1/tenants/{}/profiles", self.base_url, tenant_id);
 
@@ -175,14 +183,18 @@ impl TenantClient {
             )));
         }
 
-        resp.json()
+        let wrapper: DataWrapper<AgentProfile> = resp
+            .json()
             .await
-            .map_err(|e| AppError::Downstream(format!("invalid profiles response: {e}")))
+            .map_err(|e| AppError::Downstream(format!("invalid profiles response: {e}")))?;
+
+        Ok(wrapper.data)
     }
 
     /// Get data sources for a tenant (used by tool executor for route_configs).
     ///
     /// Calls `GET /api/v1/tenants/:id/data-sources`.
+    /// Response format: `{"data": [...]}`
     pub async fn get_data_sources(&self, tenant_id: Uuid) -> Result<Vec<DataSource>, AppError> {
         let url = format!(
             "{}/api/v1/tenants/{}/data-sources",
@@ -204,8 +216,11 @@ impl TenantClient {
             )));
         }
 
-        resp.json()
+        let wrapper: DataWrapper<DataSource> = resp
+            .json()
             .await
-            .map_err(|e| AppError::Downstream(format!("invalid data-sources response: {e}")))
+            .map_err(|e| AppError::Downstream(format!("invalid data-sources response: {e}")))?;
+
+        Ok(wrapper.data)
     }
 }
