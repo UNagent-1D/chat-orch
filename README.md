@@ -120,9 +120,6 @@ docs/                       API contracts, downstream contracts, escalation docs
 # Unit + integration tests
 cargo test
 
-# Benchmarks (criterion)
-cargo bench
-
 # Load tests (requires running instance + k6)
 ./scripts/load_test.sh
 ```
