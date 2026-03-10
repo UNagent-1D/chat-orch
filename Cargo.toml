@@ -1,0 +1,81 @@
+[package]
+name = "chat-orch"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "General Orchestrator — universal chat ingestion and routing for multi-tenant conversational AI"
+license = "MIT"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = [
+    "trace",
+    "timeout",
+    "limit",
+    "catch-panic",
+    "cors",
+] }
+
+# HTTP client (downstream services + channel APIs)
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+
+# Redis (sessions + dedup — required for horizontal scaling)
+redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
+
+# In-memory cache (read-only downstream data: channel→tenant, agent config)
+moka = { version = "0.12", features = ["future"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Configuration
+dotenvy = "0.15"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Crypto (webhook signature verification + constant-time comparison)
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+subtle = "2"
+
+# JWT (REST endpoint authentication)
+jsonwebtoken = "9"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Async utilities
+async-trait = "0.1"
+futures = "0.3"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Identifiers
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["async_tokio"] }
+http-body-util = "0.1"
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
