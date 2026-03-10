@@ -125,9 +125,6 @@ cargo bench
 
 # Load tests (requires running instance + k6)
 ./scripts/load_test.sh
-
-# Full stack with mock services
-docker compose up --build
 ```
 
 ## Configuration
