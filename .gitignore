@@ -37,3 +37,6 @@ Thumbs.db
 # Test artifacts
 *.profraw
 lcov.info
+
+# Local planning docs
+PLAN.md
