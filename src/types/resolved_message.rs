@@ -59,7 +59,8 @@ pub struct ResolvedMessage {
 impl ResolvedMessage {
     /// Build the session key for Redis session lookup.
     ///
-    /// Format: `{tenant_id}:{channel_type}:{channel_user_id}`
+    /// The resulting `SessionKey` serializes to Redis key format:
+    /// `session:{tenant_id}:{channel_type}:{channel_user_id}`
     pub fn session_key(&self) -> SessionKey {
         SessionKey {
             tenant_id: self.tenant_id,

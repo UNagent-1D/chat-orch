@@ -82,7 +82,8 @@ impl Session {
         }
     }
 
-    /// Touch the session to refresh its idle TTL.
+    /// Update `last_activity` timestamp. The caller (pipeline session layer)
+    /// is responsible for persisting this change and refreshing the Redis TTL.
     pub fn touch(&mut self) {
         self.last_activity = Utc::now();
     }

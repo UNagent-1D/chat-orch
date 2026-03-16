@@ -14,7 +14,7 @@ decisions in the ingest layer.
 |---|-------------|----------------|-------------------|----------|
 | 1 | **Text** | Yes | Full conversation turn | P0 |
 | 2 | **Image** (with caption) | Yes | Process caption as text, acknowledge image receipt | P0 |
-| 3 | **Image** (no caption) | Yes | "I received your image. Could you describe what you need in text?" | P1 |
+| 3 | **Image** (no caption) | No | "I received your image. Could you describe what you need in text?" | P2 |
 | 4 | **Video** | No | "I can help you via text. Please type your request." | P2 |
 | 5 | **Audio / Voice** | No (v1) | "I can't process audio yet. Please type your request." (v2: Whisper transcription) | P2 |
 | 6 | **Document** | No (v1) | "I received your document. Please describe what you need." | P2 |
