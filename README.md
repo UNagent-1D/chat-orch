@@ -108,10 +108,10 @@ src/
   pipeline/            Concurrency: semaphore-bounded task spawning, sessions, dedup
   llm/                 LLM client trait, OpenAI impl, tool executor, turn loop
 
-docker/                Dockerfile, Caddyfile, k6 load test script
-mock-services/         Python mocks for downstream services
-docs/                  API contracts, downstream contracts, escalation docs
-tests/                 Integration tests (wiremock-based)
+(planned) docker/           Containerization assets (Dockerfile, Caddyfile, k6 load test scripts) — not yet in this repo
+(planned) mock-services/    Python mocks for downstream services — not yet in this repo
+docs/                       API contracts, downstream contracts, escalation docs
+(planned) tests/            Integration tests (wiremock-based) — not yet in this repo
 ```
 
 ## Testing
@@ -120,14 +120,8 @@ tests/                 Integration tests (wiremock-based)
 # Unit + integration tests
 cargo test
 
-# Benchmarks (criterion)
-cargo bench
-
 # Load tests (requires running instance + k6)
 ./scripts/load_test.sh
-
-# Full stack with mock services
-docker compose up --build
 ```
 
 ## Configuration

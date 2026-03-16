@@ -74,8 +74,12 @@ impl IntoResponse for AppError {
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into()),
         };
 
-        // Log the full error server-side
-        tracing::error!(error = %self, status = %status, "request error");
+        // Log the full error server-side, using warn! for expected 4xx client errors
+        if status.is_client_error() {
+            tracing::warn!(error = %self, status = %status, "request error");
+        } else {
+            tracing::error!(error = %self, status = %status, "request error");
+        }
 
         let body = serde_json::json!({ "error": message });
         (status, axum::Json(body)).into_response()
