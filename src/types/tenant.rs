@@ -10,7 +10,7 @@ use super::ingest_message::ChannelType;
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ChannelLookupKey {
     pub channel_type: ChannelType,
-    /// For Telegram: bot token hash. For WhatsApp: `phone_number_id`.
+    /// For Telegram: `tenant_slug` (from webhook URL). For WhatsApp: `phone_number_id`.
     pub channel_key: String,
 }
 

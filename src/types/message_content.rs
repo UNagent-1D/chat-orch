@@ -10,11 +10,8 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessageContent {
     // ── P0: Always route to LLM ──────────────────────────────────────
-
     /// Plain text message — the primary content type.
-    Text {
-        text: String,
-    },
+    Text { text: String },
 
     /// Structured response from interactive menus (WhatsApp list/button reply).
     Interactive {
@@ -33,7 +30,6 @@ pub enum MessageContent {
     },
 
     // ── P1: Route to LLM with context ────────────────────────────────
-
     /// Image with optional caption. Caption is sent to LLM as text.
     Image {
         /// Telegram `file_id` or WhatsApp media URL/ID.
@@ -42,13 +38,9 @@ pub enum MessageContent {
     },
 
     /// Geographic location — useful for finding nearby clinics.
-    Location {
-        lat: f64,
-        lng: f64,
-    },
+    Location { lat: f64, lng: f64 },
 
     // ── P2: Acknowledge with fallback, don't route to LLM ────────────
-
     /// Video message — not processed in v1.
     Video {
         file_id: String,
@@ -62,19 +54,12 @@ pub enum MessageContent {
     },
 
     /// Document/file attachment — not processed in v1.
-    Document {
-        file_id: String,
-        filename: String,
-    },
+    Document { file_id: String, filename: String },
 
     /// Shared contact information.
-    Contact {
-        name: String,
-        phone: String,
-    },
+    Contact { name: String, phone: String },
 
     // ── P3: Silent acknowledge or skip ───────────────────────────────
-
     /// Sticker — silently acknowledged, no reply.
     Sticker {
         file_id: String,
@@ -88,7 +73,6 @@ pub enum MessageContent {
     },
 
     // ── Catch-all ────────────────────────────────────────────────────
-
     /// Unknown or unsupported message type.
     /// Logged + metricked + polite fallback reply sent to user.
     Unsupported {
@@ -107,7 +91,10 @@ impl MessageContent {
             MessageContent::Text { .. }
                 | MessageContent::Interactive { .. }
                 | MessageContent::CallbackQuery { .. }
-                | MessageContent::Image { caption: Some(_), .. }
+                | MessageContent::Image {
+                    caption: Some(_),
+                    ..
+                }
                 | MessageContent::Location { .. }
         )
     }
@@ -133,8 +120,12 @@ impl MessageContent {
         )
     }
 
-    /// Human-readable type name for logging and metrics.
-    pub fn type_name(&self) -> &str {
+    /// Stable, low-cardinality type name safe for use as a metric label.
+    ///
+    /// For `Unsupported` variants this returns the fixed string `"unsupported"`
+    /// rather than the raw provider-supplied name — use [`raw_type_name()`] if
+    /// you need the original value for debug logging.
+    pub fn type_name(&self) -> &'static str {
         match self {
             MessageContent::Text { .. } => "text",
             MessageContent::Interactive { .. } => "interactive",
@@ -147,7 +138,16 @@ impl MessageContent {
             MessageContent::Contact { .. } => "contact",
             MessageContent::Sticker { .. } => "sticker",
             MessageContent::Reaction { .. } => "reaction",
-            MessageContent::Unsupported { type_name, .. } => type_name,
+            MessageContent::Unsupported { .. } => "unsupported",
+        }
+    }
+
+    /// The raw type name from the channel provider (only meaningful for
+    /// `Unsupported` variants). Returns `None` for known types.
+    pub fn raw_type_name(&self) -> Option<&str> {
+        match self {
+            MessageContent::Unsupported { type_name, .. } => Some(type_name),
+            _ => None,
         }
     }
 }

@@ -8,56 +8,97 @@ use super::session::SessionKey;
 
 /// Phase 2 message: tenant is resolved and guaranteed present.
 ///
-/// Created via `IngestMessage::resolve(tenant)`. The `tenant_id` and
-/// `agent_profile_id` fields are NOT `Option` — they are guaranteed to
-/// exist at compile time. This prevents any code path from accidentally
-/// processing a message without a known tenant.
+/// Created exclusively via [`IngestMessage::resolve()`]. Fields are
+/// `pub(crate)` so nothing outside this crate can construct the struct
+/// directly — the TypeState transition is the only entry point.
 ///
-/// # Usage
-/// ```text
-/// // You CANNOT construct this directly — must go through IngestMessage::resolve()
-/// let resolved: ResolvedMessage = ingest_msg.resolve(tenant_resolution);
-/// // Now tenant_id is guaranteed:
-/// let tenant = resolved.tenant_id; // Uuid, not Option<Uuid>
-/// ```
+/// Read access is provided through public accessor methods.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedMessage {
     /// Channel-specific message ID.
-    pub id: String,
+    pub(crate) id: String,
 
     /// Which platform this message came from.
-    pub channel_type: ChannelType,
+    pub(crate) channel_type: ChannelType,
 
     /// User identifier within the channel.
-    pub channel_user_id: String,
+    pub(crate) channel_user_id: String,
 
     /// Channel-level identifier (phone_number_id or tenant_slug).
-    pub channel_key: String,
+    pub(crate) channel_key: String,
 
     /// The tenant this message belongs to. **Guaranteed present.**
-    pub tenant_id: Uuid,
+    pub(crate) tenant_id: Uuid,
 
     /// The tenant's URL-safe slug (e.g., "hospital-san-ignacio").
-    pub tenant_slug: String,
+    pub(crate) tenant_slug: String,
 
     /// Which agent profile handles this tenant's conversations. **Guaranteed present.**
-    pub agent_profile_id: Uuid,
+    pub(crate) agent_profile_id: Uuid,
 
     /// The actual message content.
-    pub content: MessageContent,
+    pub(crate) content: MessageContent,
 
     /// If this message is a reply to another message.
-    pub reply_to_id: Option<String>,
+    pub(crate) reply_to_id: Option<String>,
 
     /// When the message was sent by the user.
-    pub timestamp: DateTime<Utc>,
+    pub(crate) timestamp: DateTime<Utc>,
 
     /// Raw channel-specific metadata preserved for debugging.
     /// Already truncated by the webhook handler that built the `IngestMessage`.
-    pub raw_metadata: Option<serde_json::Value>,
+    pub(crate) raw_metadata: Option<serde_json::Value>,
 }
 
 impl ResolvedMessage {
+    // ── Accessors ────────────────────────────────────────────────────
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn channel_type(&self) -> ChannelType {
+        self.channel_type
+    }
+
+    pub fn channel_user_id(&self) -> &str {
+        &self.channel_user_id
+    }
+
+    pub fn channel_key(&self) -> &str {
+        &self.channel_key
+    }
+
+    pub fn tenant_id(&self) -> Uuid {
+        self.tenant_id
+    }
+
+    pub fn tenant_slug(&self) -> &str {
+        &self.tenant_slug
+    }
+
+    pub fn agent_profile_id(&self) -> Uuid {
+        self.agent_profile_id
+    }
+
+    pub fn content(&self) -> &MessageContent {
+        &self.content
+    }
+
+    pub fn reply_to_id(&self) -> Option<&str> {
+        self.reply_to_id.as_deref()
+    }
+
+    pub fn timestamp(&self) -> DateTime<Utc> {
+        self.timestamp
+    }
+
+    pub fn raw_metadata(&self) -> Option<&serde_json::Value> {
+        self.raw_metadata.as_ref()
+    }
+
+    // ── Derived helpers ──────────────────────────────────────────────
+
     /// Build the session key for Redis session lookup.
     ///
     /// The resulting `SessionKey` serializes to Redis key format:
