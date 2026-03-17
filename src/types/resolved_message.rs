@@ -52,7 +52,8 @@ pub struct ResolvedMessage {
     /// When the message was sent by the user.
     pub timestamp: DateTime<Utc>,
 
-    /// Preserved raw channel-specific metadata for debugging.
+    /// Raw channel-specific metadata preserved for debugging.
+    /// Already truncated by the webhook handler that built the `IngestMessage`.
     pub raw_metadata: Option<serde_json::Value>,
 }
 

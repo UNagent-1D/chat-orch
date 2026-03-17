@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::message_content::MessageContent;
 use super::resolved_message::ResolvedMessage;
+use super::tenant::{ChannelLookupKey, TenantResolution};
 
 /// The channel type of the originating platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -28,30 +28,6 @@ impl std::fmt::Display for ChannelType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
-}
-
-/// Lookup key for resolving channel → tenant mapping.
-///
-/// Used as a cache key in the channel_cache (moka).
-/// `channel_type + channel_key` together are globally unique.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct ChannelLookupKey {
-    pub channel_type: ChannelType,
-    /// For Telegram: bot token hash. For WhatsApp: `phone_number_id`.
-    pub channel_key: String,
-}
-
-/// Result of resolving a channel to its tenant.
-///
-/// Returned by `GET /internal/resolve-channel` on the Tenant Service
-/// (or from the moka cache).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TenantResolution {
-    pub tenant_id: Uuid,
-    pub tenant_slug: String,
-    pub agent_profile_id: Uuid,
-    pub webhook_secret_ref: String,
-    pub is_active: bool,
 }
 
 /// Phase 1 message: webhook parsed and normalized, but tenant is NOT yet known.
@@ -88,8 +64,11 @@ pub struct IngestMessage {
     /// When the message was sent by the user.
     pub timestamp: DateTime<Utc>,
 
-    /// Preserved raw channel-specific metadata for debugging.
-    /// Truncated to prevent memory bloat.
+    /// Raw channel-specific metadata preserved for debugging.
+    ///
+    /// **Callers MUST truncate this to a reasonable size (e.g. 1 KB) before
+    /// constructing `IngestMessage`.** The type itself does not enforce a size
+    /// limit — truncation is the responsibility of the webhook handler.
     pub raw_metadata: Option<serde_json::Value>,
 }
 
