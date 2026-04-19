@@ -15,6 +15,107 @@ pub struct MetricasClient {
     base_url: String,
 }
 
+#[derive(Clone)]
+pub struct TelegramClient {
+    http: Client,
+    base_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TelegramUpdate {
+    pub update_id: i64,
+    #[serde(default)]
+    pub message: Option<TelegramMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TelegramMessage {
+    pub chat: TelegramChat,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TelegramChat {
+    pub id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetUpdatesResponse {
+    ok: bool,
+    #[serde(default)]
+    result: Vec<TelegramUpdate>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SendMessageBody<'a> {
+    chat_id: i64,
+    text: &'a str,
+}
+
+impl TelegramClient {
+    pub fn new(http: Client, bot_token: &str) -> Self {
+        Self {
+            http,
+            base_url: format!("https://api.telegram.org/bot{bot_token}"),
+        }
+    }
+
+    pub async fn get_updates(
+        &self,
+        offset: Option<i64>,
+        timeout_secs: u64,
+    ) -> Result<Vec<TelegramUpdate>, AppError> {
+        let url = format!("{}/getUpdates", self.base_url);
+        let mut req = self.http.get(&url).query(&[("timeout", timeout_secs)]);
+        if let Some(offset) = offset {
+            req = req.query(&[("offset", offset)]);
+        }
+        // Long-poll budget: allow a little extra over the server-side timeout.
+        let response = req
+            .timeout(std::time::Duration::from_secs(timeout_secs + 10))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::Downstream(format!(
+                "telegram getUpdates {status}: {}",
+                body.chars().take(200).collect::<String>()
+            )));
+        }
+        let parsed: GetUpdatesResponse = response.json().await?;
+        if !parsed.ok {
+            return Err(AppError::Downstream(format!(
+                "telegram getUpdates not ok: {}",
+                parsed.description.unwrap_or_default()
+            )));
+        }
+        Ok(parsed.result)
+    }
+
+    pub async fn send_message(&self, chat_id: i64, text: &str) -> Result<(), AppError> {
+        let url = format!("{}/sendMessage", self.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .json(&SendMessageBody { chat_id, text })
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::Downstream(format!(
+                "telegram sendMessage {status}: {}",
+                body.chars().take(200).collect::<String>()
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize)]
 struct MetricasChatBody<'a> {
     message: &'a str,
@@ -48,6 +149,26 @@ impl MetricasClient {
             }
         });
     }
+
+    /// Fire-and-forget CSAT feedback emission.
+    pub fn record_feedback(&self, tenant_id: String, score: u8) {
+        let http = self.http.clone();
+        let url = format!("{}/feedback/csat", self.base_url.trim_end_matches('/'));
+        let body = serde_json::json!({ "score": score });
+        tokio::spawn(async move {
+            let result = http
+                .post(&url)
+                .header("X-Tenant-ID", &tenant_id)
+                .json(&body)
+                .send()
+                .await;
+            match result {
+                Ok(resp) if resp.status().is_success() => {}
+                Ok(resp) => tracing::warn!(status=%resp.status(), %url, "metricas feedback non-2xx"),
+                Err(err) => tracing::warn!(error=%err, %url, "metricas feedback failed"),
+            }
+        });
+    }
 }
 
 #[derive(Serialize)]
@@ -75,6 +196,7 @@ impl ConversationChatClient {
         let response = self
             .http
             .post(&url)
+            .bearer_auth("internal")
             .json(&CreateSessionBody { tenant_id })
             .send()
             .await?;
@@ -104,6 +226,7 @@ impl ConversationChatClient {
         let response = self
             .http
             .post(&url)
+            .bearer_auth("internal")
             .json(&TurnBody { message })
             .send()
             .await?;

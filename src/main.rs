@@ -4,7 +4,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chat_orch::config::AppConfig;
-use chat_orch::gateway::{ConversationChatClient, MetricasClient};
+use chat_orch::gateway::{MetricasClient, TelegramClient};
+use chat_orch::hospital::HospitalClient;
+use chat_orch::llm::LlmClient;
+use chat_orch::session::SessionStore;
+use chat_orch::sse::SseHub;
+use chat_orch::telegram::TelegramLoop;
 use chat_orch::{routes, AppState};
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -22,13 +27,46 @@ async fn main() -> Result<()> {
         .build()
         .context("building reqwest client")?;
 
-    let conversation_chat =
-        ConversationChatClient::new(http.clone(), config.conversation_chat_url.clone());
+    let llm = Arc::new(LlmClient::new(
+        http.clone(),
+        config.openai_base_url.clone(),
+        config.openai_api_key.clone(),
+        config.openai_default_model.clone(),
+    ));
+
+    let hospital = Arc::new(HospitalClient::new(
+        http.clone(),
+        config.hospital_mock_url.clone(),
+    ));
+
+    let sessions = SessionStore::new();
 
     let metricas = config
         .metricas_url
         .clone()
         .map(|url| MetricasClient::new(http.clone(), url));
+
+    let hub = SseHub::new();
+
+    if let (Some(token), Some(tenant_id)) = (
+        config.telegram_bot_token.clone(),
+        config.telegram_default_tenant_id.clone(),
+    ) {
+        let telegram = TelegramClient::new(http.clone(), &token);
+        TelegramLoop::new(
+            telegram,
+            llm.clone(),
+            hospital.clone(),
+            sessions.clone(),
+            metricas.clone(),
+            tenant_id,
+        )
+        .spawn();
+    } else {
+        tracing::info!(
+            "telegram loop disabled (TELEGRAM_BOT_TOKEN and/or TELEGRAM_DEFAULT_TENANT_ID unset)"
+        );
+    }
 
     let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port)
         .parse()
@@ -41,8 +79,11 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         config: Arc::new(config),
-        conversation_chat,
+        llm,
+        hospital,
+        sessions,
         metricas,
+        hub,
     };
 
     let app = routes::build_router(state);

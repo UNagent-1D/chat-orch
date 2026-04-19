@@ -6,7 +6,11 @@ pub struct AppConfig {
     pub server_port: u16,
     pub conversation_chat_url: String,
     pub tenant_service_url: String,
+    pub hospital_mock_url: String,
     pub metricas_url: Option<String>,
+    pub telegram_bot_token: Option<String>,
+    pub telegram_default_tenant_id: Option<String>,
+    pub cors_allow_origin: String,
     pub openai_api_key: String,
     pub openai_base_url: String,
     pub openai_default_model: String,
@@ -25,9 +29,11 @@ impl AppConfig {
                 })?,
             conversation_chat_url: env_required("CONVERSATION_CHAT_URL")?,
             tenant_service_url: env_required("TENANT_SERVICE_URL")?,
-            metricas_url: std::env::var("METRICAS_URL")
-                .ok()
-                .filter(|v| !v.is_empty()),
+            hospital_mock_url: env_or("HOSPITAL_MOCK_URL", "http://hospital-mock:8080"),
+            metricas_url: env_opt("METRICAS_URL"),
+            telegram_bot_token: env_opt("TELEGRAM_BOT_TOKEN"),
+            telegram_default_tenant_id: env_opt("TELEGRAM_DEFAULT_TENANT_ID"),
+            cors_allow_origin: env_or("CORS_ALLOW_ORIGIN", "http://localhost:3000"),
             openai_api_key: env_required("OPENAI_API_KEY")?,
             openai_base_url: env_or("OPENAI_BASE_URL", "https://openrouter.ai/api/v1"),
             openai_default_model: env_or(
@@ -52,6 +58,10 @@ fn env_or(key: &str, default: &str) -> String {
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+fn env_opt(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
 #[cfg(test)]

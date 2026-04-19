@@ -10,7 +10,10 @@ license = "MIT"
 # Web framework
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.5", features = ["trace"] }
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
 
 # HTTP client (downstream: conversation-chat)
 reqwest = { version = "0.12", default-features = false, features = [
