@@ -9,6 +9,47 @@ pub struct ConversationChatClient {
     base_url: String,
 }
 
+#[derive(Clone)]
+pub struct MetricasClient {
+    http: Client,
+    base_url: String,
+}
+
+#[derive(Serialize)]
+struct MetricasChatBody<'a> {
+    message: &'a str,
+    resolved: bool,
+}
+
+impl MetricasClient {
+    pub fn new(http: Client, base_url: String) -> Self {
+        Self { http, base_url }
+    }
+
+    /// Fire-and-forget — logs a warning on failure and never returns an error.
+    /// Spawned onto the tokio runtime so request latency is unaffected.
+    pub fn record_turn(&self, tenant_id: String, message: String, resolved: bool) {
+        let http = self.http.clone();
+        let url = format!(
+            "{}/conversation/chat",
+            self.base_url.trim_end_matches('/')
+        );
+        tokio::spawn(async move {
+            let result = http
+                .post(&url)
+                .header("X-Tenant-ID", &tenant_id)
+                .json(&MetricasChatBody { message: &message, resolved })
+                .send()
+                .await;
+            match result {
+                Ok(resp) if resp.status().is_success() => {}
+                Ok(resp) => tracing::warn!(status=%resp.status(), %url, "metricas emit non-2xx"),
+                Err(err) => tracing::warn!(error=%err, %url, "metricas emit failed"),
+            }
+        });
+    }
+}
+
 #[derive(Serialize)]
 struct CreateSessionBody<'a> {
     tenant_id: &'a str,

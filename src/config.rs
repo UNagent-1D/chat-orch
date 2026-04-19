@@ -6,6 +6,7 @@ pub struct AppConfig {
     pub server_port: u16,
     pub conversation_chat_url: String,
     pub tenant_service_url: String,
+    pub metricas_url: Option<String>,
     pub openai_api_key: String,
     pub openai_base_url: String,
     pub openai_default_model: String,
@@ -24,6 +25,9 @@ impl AppConfig {
                 })?,
             conversation_chat_url: env_required("CONVERSATION_CHAT_URL")?,
             tenant_service_url: env_required("TENANT_SERVICE_URL")?,
+            metricas_url: std::env::var("METRICAS_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
             openai_api_key: env_required("OPENAI_API_KEY")?,
             openai_base_url: env_or("OPENAI_BASE_URL", "https://openrouter.ai/api/v1"),
             openai_default_model: env_or(

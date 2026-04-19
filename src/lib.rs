@@ -11,4 +11,5 @@ pub use error::AppError;
 pub struct AppState {
     pub config: Arc<config::AppConfig>,
     pub conversation_chat: gateway::ConversationChatClient,
+    pub metricas: Option<gateway::MetricasClient>,
 }

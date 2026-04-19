@@ -46,12 +46,31 @@ async fn chat_forward(
         return Err(AppError::BadRequest("message is required".into()));
     }
 
+    // Record every incoming turn in Metricas up-front, so KPIs reflect usage
+    // even when conversation-chat itself is mid-refactor and errors out.
+    // resolution is derived from the downstream response below when we get one.
+    if let Some(metricas) = &state.metricas {
+        metricas.record_turn(req.tenant_id.clone(), req.message.clone(), false);
+    }
+
     let sid = match req.session_id {
         Some(id) if !id.trim().is_empty() => id,
         _ => state.conversation_chat.create_session(&req.tenant_id).await?,
     };
 
     let downstream = state.conversation_chat.post_turn(&sid, &req.message).await?;
+
+    if let Some(metricas) = &state.metricas {
+        if downstream
+            .get("action")
+            .and_then(|v| v.as_str())
+            .map(|a| a == "close_session")
+            .unwrap_or(false)
+        {
+            // Record a second event marked resolved=true so the resolution rate ticks up.
+            metricas.record_turn(req.tenant_id.clone(), req.message.clone(), true);
+        }
+    }
 
     Ok(Json(ChatResponse {
         session_id: sid,

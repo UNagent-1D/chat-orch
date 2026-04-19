@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chat_orch::config::AppConfig;
-use chat_orch::gateway::ConversationChatClient;
+use chat_orch::gateway::{ConversationChatClient, MetricasClient};
 use chat_orch::{routes, AppState};
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -23,7 +23,12 @@ async fn main() -> Result<()> {
         .context("building reqwest client")?;
 
     let conversation_chat =
-        ConversationChatClient::new(http, config.conversation_chat_url.clone());
+        ConversationChatClient::new(http.clone(), config.conversation_chat_url.clone());
+
+    let metricas = config
+        .metricas_url
+        .clone()
+        .map(|url| MetricasClient::new(http.clone(), url));
 
     let addr: SocketAddr = format!("{}:{}", config.server_host, config.server_port)
         .parse()
@@ -37,6 +42,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         config: Arc::new(config),
         conversation_chat,
+        metricas,
     };
 
     let app = routes::build_router(state);
