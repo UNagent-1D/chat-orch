@@ -10,8 +10,8 @@ tool calls, and history. `chat-orch` does nothing else.
 - **Framework**: Axum 0.7 + Tokio
 - **License**: MIT
 
-The authoritative scope doc is [`REFACTOR_PROMPT.md`](REFACTOR_PROMPT.md).
-Anything outside that spec is out of scope.
+The authoritative scope doc is [`TECHNICAL.md`](TECHNICAL.md). Anything
+outside that spec is out of scope.
 
 ## Build & Run
 
