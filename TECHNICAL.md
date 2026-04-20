@@ -257,12 +257,12 @@ pub enum AppError {
 
 ---
 
-## 11. Scope drift vs. the original refactor spec
+## 11. Scope drift vs. the original "thin forwarder" design
 
-`REFACTOR_PROMPT.md` describes a strictly "thin forwarder" to
-`conversation-chat`. The current implementation is broader:
+An earlier iteration of this service was spec'd as a strictly "thin
+forwarder" to `conversation-chat`. The current implementation is broader:
 
-| `REFACTOR_PROMPT.md` says | Reality in `src/` |
+| Original spec | Reality in `src/` |
 |----|----|
 | "Forward turns to conversation-chat; nothing else." | Calls the LLM directly, executes tools, owns sessions. |
 | No LLM calls from chat-orch. | `llm::LlmClient` calls `{OPENAI_BASE_URL}/chat/completions`. |
@@ -280,8 +280,8 @@ constructed by `main.rs`. `CONVERSATION_CHAT_URL` and `TENANT_SERVICE_URL`
 are still required at startup to avoid config breakage with the compose
 stack, but they are not called on the request path.
 
-**Implication for graders / reviewers:** treat `REFACTOR_PROMPT.md` as
-historical and this document as the current contract.
+**Implication for graders / reviewers:** treat this document as the
+current contract.
 
 ---
 

@@ -180,5 +180,3 @@ Multi-stage: `rust:1.88-slim` builder → `debian:bookworm-slim` runtime with
 
 - [`TECHNICAL.md`](TECHNICAL.md) — design notes, data flow, trade-offs.
 - [`AGENTS.md`](AGENTS.md) — short brief for agents working on this repo.
-- [`REFACTOR_PROMPT.md`](REFACTOR_PROMPT.md) — historic scope note; partially
-  superseded by the current implementation (see TECHNICAL.md §"Scope drift").
