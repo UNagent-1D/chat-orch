@@ -1,165 +1,182 @@
-# Chat Orchestrator
+# Chat Orchestrator (`chat-orch`)
 
-General Orchestrator for a multi-tenant conversational AI platform.
-Acts as the universal ingestion point for chat messages from any channel
-(Telegram, WhatsApp, future sources), normalizes them, resolves tenants,
-manages sessions, executes LLM-powered conversation turns with tool calling,
-and delivers responses back to the originating channel.
+General orchestrator for a multi-tenant hospital chatbot prototype. `chat-orch`
+is the HTTP front door: it terminates chat traffic from the frontend and from
+Telegram, runs the LLM tool-calling loop against `hospital-mock`, keeps
+per-session conversation history in memory, streams assistant replies over
+Server-Sent Events, and emits KPI events to the `metricas` service.
 
-- **Language:** Rust (edition 2021, MSRV 1.75)
+- **Language:** Rust (edition 2021, MSRV 1.75 — build image pins 1.88)
 - **Framework:** Axum 0.7 + Tokio
-- **Scale target:** 100k msg/sec (architecture-ready)
+- **LLM transport:** OpenAI-compatible Chat Completions (default: OpenRouter)
 - **License:** MIT
 
 ## Architecture
 
 ```
-Telegram ──► /webhook/telegram/:slug ─┐
-                                      ├─► Normalize ─► Resolve Tenant ─► Session ─► LLM Turn Loop ─► Reply
-WhatsApp ──► /webhook/whatsapp ───────┘                                              ▲
-                                                                                     │
-REST ──────► /conversation/chat/turn ────────────────────────────────────────────────►┘
+  ┌──────────┐         ┌──────────────┐        ┌───────────────┐
+  │ frontend │ ──────► │              │ ─────► │  OpenRouter   │
+  └──────────┘  HTTP   │              │  LLM   │  (chat.comp.) │
+                       │              │        └───────────────┘
+  ┌──────────┐  long   │  chat-orch   │        ┌───────────────┐
+  │ Telegram │ ──────► │              │ ─────► │ hospital-mock │
+  └──────────┘  poll   │              │ tools  └───────────────┘
+                       │              │
+                       │              │ fire&  ┌───────────────┐
+                       │              │ forget │   metricas    │
+                       └──────────────┘ ─────► └───────────────┘
+                              │
+                              │ SSE
+                              ▼
+                         browser tab
 ```
 
-Messages flow through this pipeline:
+Per `POST /v1/chat`:
 
-1. **Ingest** — Webhook arrives, signature verified, payload parsed, normalized to `IngestMessage`
-2. **Pipeline** — Semaphore permit acquired (10K max), `tokio::spawn` background task
-3. **Resolve** — Channel key mapped to tenant via moka cache (backed by Tenant Service)
-4. **Session** — Redis session created or retrieved (composite key: tenant + channel + user)
-5. **Conversation** — Agent config fetched, tool registry merged, LLM turn loop executed (with tool calls)
-6. **Reply** — Response formatted for originating channel and sent via channel API
+1. Accept `{tenant_id, session_id?, message}`.
+2. Mint a `session_id` if absent.
+3. Append the user turn to the in-memory session history.
+4. Call the LLM with the full history + OpenAI-style tool schemas.
+5. If the LLM returns `tool_calls`, dispatch each to `hospital-mock`,
+   append the tool results, and loop (up to `MAX_TOOL_ROUNDS = 5`).
+6. When the LLM returns plain content, publish it on the session's SSE
+   channel and return it to the caller.
+7. Emit turn + resolution events to `metricas` (fire-and-forget).
 
-Webhook handlers return fast (200/503) — processing happens in the background.
-REST handlers (`/conversation/chat/turn`) await the full response synchronously.
+## HTTP Surface
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Liveness probe. `{"status":"ok"}`. |
+| `/v1/chat` | POST | Runs one chat turn. Body: `{tenant_id, session_id?, message}`. |
+| `/v1/chat/stream` | GET | SSE channel for a session. Query: `?session_id=...`. |
+| `/v1/feedback` | POST | CSAT feedback. Body: `{tenant_id, session_id?, score (1-5)}`. |
+
+Error responses are always `{"error": "..."}`:
+
+- `400` — malformed body, missing `tenant_id`/`message`, score out of range.
+- `502` — downstream (LLM, hospital-mock, Telegram, metricas) failure.
+- `500` — anything else.
+
+### `POST /v1/chat`
+
+Request:
+
+```json
+{ "tenant_id": "demo-tenant", "session_id": "sess-...", "message": "Quiero una cita con cardiología" }
+```
+
+Response:
+
+```json
+{ "session_id": "sess-...", "message": { "text": "Claro, ¿tienes tu patient_ref?..." } }
+```
+
+If `session_id` is omitted, the server mints one (`sess-<uuid v4>`) and
+returns it. Clients must echo it on subsequent turns to keep history.
+
+### `GET /v1/chat/stream?session_id=...`
+
+Server-Sent Events stream for the given session. Each event's `data` payload
+is `{"kind":"assistant","text":"..."}`. A keep-alive `ping` is sent every 15s.
+Events are only delivered to subscribers that connect **before** the turn
+completes; there is no replay buffer.
+
+### `POST /v1/feedback`
+
+Fire-and-forget CSAT capture. Forwarded to `metricas` as
+`POST {METRICAS_URL}/feedback/csat` with header `X-Tenant-ID`.
 
 ## Quick Start
 
-### Prerequisites
-
-- Rust 1.75+ (`rustup update`)
-- Redis 7+ (or use Docker)
-- A `.env` file (copy from `.env.example`)
-
-### Local Development
-
 ```bash
-# Start Redis (if not running)
-docker compose up redis -d
-
-# Copy env file and fill in values
 cp .env.example .env
-
-# Build and run
+# Set at minimum: CONVERSATION_CHAT_URL, TENANT_SERVICE_URL, OPENAI_API_KEY,
+# HOSPITAL_MOCK_URL
 cargo run
 ```
 
-The server starts on `http://0.0.0.0:3000` by default.
-
-### Docker (full stack)
+The server binds `0.0.0.0:3000` by default.
 
 ```bash
-docker compose up --build
-```
+curl -s http://localhost:3000/health
+# {"status":"ok"}
 
-This starts the orchestrator, Redis, Caddy (TLS proxy), and Python mock services
-for the Tenant Service, Agent Config Registry, and channel APIs.
-
-## API Endpoints
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/health` | GET | None | Liveness probe |
-| `/ready` | GET | None | Readiness probe (checks Redis) |
-| `/metrics/pipeline` | GET | API Key (`X-Api-Key`) | Pipeline metrics (semaphore, sessions) |
-| `/webhook/telegram/:tenant_slug` | POST | `X-Telegram-Bot-Api-Secret-Token` | Telegram webhook ingestion |
-| `/webhook/whatsapp` | GET | Verify token (query param) | WhatsApp webhook verification |
-| `/webhook/whatsapp` | POST | HMAC-SHA256 (`X-Hub-Signature-256`) | WhatsApp webhook ingestion |
-| `/conversation/entrypoint/open` | POST | JWT Bearer | Open a new conversation session |
-| `/conversation/chat/turn` | POST | JWT Bearer | Execute a conversation turn (synchronous) |
-
-### Interactive API Docs (Swagger)
-
-Full OpenAPI 3.0.3 spec is at [`docs/openapi.yaml`](docs/openapi.yaml). To browse it interactively:
-
-```bash
-# Option A: Swagger UI via Docker
-docker run -p 8080:8080 -e SWAGGER_JSON=/spec/openapi.yaml \
-  -v ./docs:/spec swaggerapi/swagger-ui
-
-# Option B: Paste into https://editor.swagger.io
+curl -s -X POST http://localhost:3000/v1/chat \
+  -H 'content-type: application/json' \
+  -d '{"tenant_id":"demo-tenant","message":"Hola, ¿qué cardiólogos tienen?"}'
 ```
 
 ## Project Structure
 
 ```
 src/
-  main.rs              Server bootstrap, tracing, graceful shutdown
-  config.rs            AppConfig loaded from environment variables
-  state.rs             AppState: caches, clients, semaphore, Redis pools
-  router.rs            Axum router: webhook routes, REST routes, middleware
-  error.rs             AppError enum with IntoResponse impl
-  conversation.rs      Turn processing logic (session + config + LLM)
-
-  auth/                JWT middleware, API key middleware
-  types/               Domain types (IngestMessage, ResolvedMessage, Session, etc.)
-  ingest/              Channel webhook handlers (Telegram, WhatsApp)
-  gateway/             HTTP clients for downstream services + caches
-  pipeline/            Concurrency: semaphore-bounded task spawning, sessions, dedup
-  llm/                 LLM client trait, OpenAI impl, tool executor, turn loop
-
-(planned) docker/           Containerization assets (Dockerfile, Caddyfile, k6 load test scripts) — not yet in this repo
-(planned) mock-services/    Python mocks for downstream services — not yet in this repo
-docs/                       API contracts, downstream contracts, escalation docs
-(planned) tests/            Integration tests (wiremock-based) — not yet in this repo
-```
-
-## Testing
-
-```bash
-# Unit + integration tests
-cargo test
-
-# Load tests (requires running instance + k6)
-./scripts/load_test.sh
+  main.rs      Bootstrap: env, tracing, reqwest client, clients, AppState,
+               Telegram loop, bind, graceful shutdown (SIGTERM/SIGINT).
+  lib.rs       Module declarations + AppState.
+  config.rs    AppConfig::from_env() and unit tests.
+  error.rs     AppError enum + IntoResponse + From<reqwest::Error>.
+  routes.rs    Router + handlers (/health, /v1/chat, /v1/feedback).
+  sse.rs       SseHub (broadcast channels per session) + /v1/chat/stream.
+  session.rs   In-memory per-session ChatMessage history (bounded).
+  runtime.rs   run_turn: system prompt + LLM loop + tool dispatch.
+  llm.rs       LlmClient: OpenAI-compatible chat.completions wrapper.
+  hospital.rs  HospitalClient + OpenAI-style tool_definitions().
+  telegram.rs  TelegramLoop: long-poll getUpdates, runs turns, sendMessage.
+  gateway.rs   TelegramClient, MetricasClient, (legacy) ConversationChatClient.
 ```
 
 ## Configuration
 
-All configuration is via environment variables. See [`.env.example`](.env.example) for the
-full list with descriptions.
+See [`.env.example`](.env.example). All variables:
 
-Key variables:
+| Variable | Required | Default | Purpose |
+|----------|----------|---------|---------|
+| `SERVER_HOST` | | `0.0.0.0` | Bind host. |
+| `SERVER_PORT` | | `3000` | Bind port. |
+| `CONVERSATION_CHAT_URL` | yes | — | Reserved; read for legacy gateway. |
+| `TENANT_SERVICE_URL` | yes | — | Reserved for future tenant lookups. |
+| `HOSPITAL_MOCK_URL` | | `http://hospital-mock:8080` | Tool execution target. |
+| `OPENAI_API_KEY` | yes | — | Bearer token for chat.completions. |
+| `OPENAI_BASE_URL` | | `https://openrouter.ai/api/v1` | LLM endpoint. |
+| `OPENAI_DEFAULT_MODEL` | | `nvidia/nemotron-3-super-120b-a12b:free` | Model id. |
+| `METRICAS_URL` | | unset | If unset, KPI emission is disabled. |
+| `TELEGRAM_BOT_TOKEN` | | unset | Enables the Telegram long-poll loop. |
+| `TELEGRAM_DEFAULT_TENANT_ID` | | unset | Required together with the token. |
+| `CORS_ALLOW_ORIGIN` | | `http://localhost:3000` | Single origin; falls back to `Any` if unparseable. |
+| `RUST_LOG` | | `chat_orch=info,tower_http=info` | `tracing_subscriber` filter. |
+| `LOG_FORMAT` | | `pretty` | `pretty` or `json`. |
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `REDIS_URL` | Yes | Redis connection URL |
-| `TENANT_SERVICE_URL` | Yes | Go Tenant Service base URL |
-| `ACR_SERVICE_URL` | Yes | Go Agent Config Registry base URL |
-| `OPENAI_API_KEY` | Yes | OpenAI API key |
-| `TELEGRAM_BOT_TOKEN` | For Telegram | Bot token from @BotFather |
-| `WHATSAPP_ACCESS_TOKEN` | For WhatsApp | Meta App access token |
-| `WHATSAPP_APP_SECRET` | For WhatsApp | App secret for signature verification |
-| `JWT_SECRET` | For REST API | JWT signing secret |
-| `METRICS_API_KEY` | No | API key for `/metrics/pipeline` (fail-closed if unset) |
-| `WHATSAPP_STATIC_TENANT_MAP` | No | JSON array for static tenant resolution (MVP workaround) |
+The Telegram loop only starts if both `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_DEFAULT_TENANT_ID` are set.
 
-## Downstream Services
+## Testing
 
-| Service | Language | Endpoints Called |
-|---------|----------|-----------------|
-| Tenant Service | Go + Gin | `GET /api/v1/tenants/:id`, `GET /internal/resolve-channel` |
-| Agent Config Registry | Go + Gin | `GET /api/v1/tenants/:id/profiles/:pid/configs/active`, `GET /api/v1/tool-registry` |
-| OpenAI API | -- | `POST /v1/chat/completions` |
-| Telegram Bot API | -- | `POST /bot<TOKEN>/sendMessage` |
-| WhatsApp Graph API | -- | `POST /v18.0/<PNID>/messages` |
+```bash
+cargo test             # config parsing happy path + missing-var error
+cargo clippy -- -D warnings
+cargo build --release
+```
 
-## Key Design Decisions
+End-to-end smoke test: `docker compose up` the full stack, then send a
+`POST /v1/chat` and watch the tracing logs for LLM and hospital-mock calls.
 
-- **TypeState pattern**: `IngestMessage` (tenant unknown) vs `ResolvedMessage` (tenant guaranteed at compile time)
-- **Handler-per-channel**: Each channel has its own Axum handler — no shared trait until a 3rd channel arrives
-- **4 independent moka caches**: Channel resolution (5min), agent config (2min), tool registry (5min), each with different TTLs and max entries
-- **Redis for write-heavy state**: Sessions and dedup use Redis for cross-replica consistency
-- **No media downloads**: Only `file_id` / URL references are stored
-- **Constant-time auth**: API key comparison uses `subtle::ConstantTimeEq` to prevent timing attacks
-- **Static tenant map**: Override-first resolution for WhatsApp tenants when the Go team's resolve-channel endpoint is unavailable
+## Docker
+
+```bash
+docker build -t chat-orch .
+docker run --rm -p 3000:3000 \
+  -e CONVERSATION_CHAT_URL=http://host.docker.internal:8082 \
+  -e TENANT_SERVICE_URL=http://host.docker.internal:8080 \
+  -e HOSPITAL_MOCK_URL=http://host.docker.internal:8081 \
+  -e OPENAI_API_KEY=sk-or-... \
+  chat-orch
+```
+
+Multi-stage: `rust:1.88-slim` builder → `debian:bookworm-slim` runtime with
+`ca-certificates`. The binary runs as non-root UID 10001 on port 3000.
+
+## Further reading
+
+- [`TECHNICAL.md`](TECHNICAL.md) — design notes, data flow, trade-offs.
+- [`AGENTS.md`](AGENTS.md) — short brief for agents working on this repo.

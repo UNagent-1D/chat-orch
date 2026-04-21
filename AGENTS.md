@@ -1,105 +1,76 @@
-# AGENTS.md — Chat Orchestrator (General Orchestrator)
+# AGENTS.md — Chat Orchestrator
 
 ## Overview
 
-This is the **General Orchestrator** for a multi-tenant conversational AI platform.
-It acts as the universal ingestion point for chat messages from any channel
-(Telegram, WhatsApp, future sources), normalizes them, resolves tenants, manages
-sessions, executes LLM-powered conversation turns with tool calling, and delivers
-responses back to the originating channel.
+Thin HTTP front-door that forwards chat requests from the frontend to
+`conversation-chat` (Go, :8082). `conversation-chat` owns sessions, LLM turns,
+tool calls, and history. `chat-orch` does nothing else.
 
-- **Language**: Rust (edition 2021, MSRV 1.75)
-- **Framework**: Axum 0.7 + Tokio (multi-threaded async runtime)
-- **Scale target**: 100k msg/sec (architecture-ready)
+- **Language**: Rust (edition 2021)
+- **Framework**: Axum 0.7 + Tokio
 - **License**: MIT
+
+The authoritative scope doc is [`TECHNICAL.md`](TECHNICAL.md). Anything
+outside that spec is out of scope.
 
 ## Build & Run
 
 ```bash
-# Install dependencies and compile
 cargo build
-
-# Run in development (requires .env file — copy from .env.example)
-cargo run
-
-# Run tests
+cargo run            # needs .env — copy from .env.example
 cargo test
-
-# Run benchmarks
-cargo bench
-
-# Run with release optimizations
 cargo run --release
-
-# Docker
-docker compose up --build
+docker build -t chat-orch .
 ```
 
 ## Project Structure
 
 ```
 src/
-  main.rs            — Server bootstrap, tracing, graceful shutdown
-  config.rs          — AppConfig loaded from environment variables
-  state.rs           — AppState: caches, clients, semaphore, Redis pools
-  router.rs          — Axum router: webhook routes, REST routes, middleware
-  error.rs           — AppError enum with IntoResponse impl
-  conversation.rs    — Turn processing logic (session + config + LLM)
-
-  types/             — Domain types (IngestMessage, ResolvedMessage, etc.)
-  ingest/            — Channel webhook handlers (Telegram, WhatsApp)
-  gateway/           — HTTP clients for downstream services + caches
-  pipeline/          — Concurrency: semaphore-bounded task spawning
-  llm/               — LLM client trait, OpenAI impl, tool executor
-  auth/              — JWT validation for REST endpoints
+  main.rs     Server bootstrap, tracing, graceful shutdown (SIGTERM/SIGINT)
+  config.rs   AppConfig (9 env vars) + unit tests
+  error.rs    AppError enum + IntoResponse + From<reqwest::Error>
+  lib.rs      Module declarations + AppState
+  routes.rs   /health and /v1/chat handlers
+  gateway.rs  ConversationChatClient (reqwest wrapper)
 ```
 
-## Architecture
+## Endpoints
 
-Messages flow through this pipeline:
+- `GET /health` → `{"status":"ok"}`.
+- `POST /v1/chat` with `{tenant_id, session_id?, message}` →
+  opens a session in conversation-chat if needed, forwards the turn,
+  returns the downstream body verbatim plus the `session_id`.
 
-1. **Ingest** — Webhook arrives, signature verified, payload parsed, normalized to `IngestMessage`
-2. **Pipeline** — Semaphore permit acquired, `tokio::spawn` background task
-3. **Resolve** — Channel key mapped to tenant via moka cache (backed by Tenant Service)
-4. **Session** — Redis session created or retrieved (composite key: tenant+channel+user)
-5. **Conversation** — Agent config fetched, LLM turn loop executed (with tool calls)
-6. **Reply** — Response formatted for originating channel and sent via channel API
+Errors: 400 for malformed body, 502 when conversation-chat is unreachable,
+500 for anything else. Body always `{"error": "..."}`.
 
-## Key Conventions
+## Conventions
 
-- **TypeState pattern**: `IngestMessage` (tenant unknown) vs `ResolvedMessage` (tenant guaranteed).
-  A `ResolvedMessage` always has a `tenant_id` — enforced at compile time.
-- **Handler-per-channel**: Each channel (Telegram, WhatsApp) has its own Axum handler.
-  No shared trait for MVP — extract when 3rd channel arrives.
-- **Webhook handlers return fast**: Acquire semaphore, spawn task, return 200/503.
-  Processing happens in the background. Replies sent via channel API.
-- **REST handlers are synchronous**: `/conversation/chat/turn` awaits the response
-  and returns it in the HTTP body. Does NOT go through the semaphore pipeline.
-- **4 independent moka caches** with different TTLs for downstream read-only data.
-- **Redis** for sessions (write-heavy, cross-replica) and dedup (atomic SETNX).
-- **Error handling**: `thiserror` for typed errors, `anyhow` in main.rs only.
-  All errors implement `IntoResponse` via `AppError`.
-- Never download media content — store `file_id` or URL references only.
-- Unsupported message types get a polite fallback reply, never silently dropped.
+- One binary, one crate. No sub-crates.
+- `axum::extract::State` for the shared `reqwest::Client` + config.
+- `thiserror::Error` on `AppError`. `anyhow` only in `main.rs`.
+- `serde::Deserialize`/`Serialize` on all request/response types. No manual
+  JSON parsing.
+- Graceful shutdown on SIGTERM + SIGINT via `tokio::signal`.
+- `tracing_subscriber` respects `LOG_FORMAT` (`json`|`pretty`) and `RUST_LOG`.
+- No `unwrap()` outside tests — use `?` + typed errors.
 
 ## Environment
 
-Requires a `.env` file — see `.env.example` for all variables.
-Critical dependencies: Redis, Tenant Service (Go), Agent Config Registry (Go).
+Needs a `.env` file — see [`.env.example`](.env.example). Nine variables.
+Required: `CONVERSATION_CHAT_URL`, `TENANT_SERVICE_URL`, `OPENAI_API_KEY`.
 
 ## Testing
 
-- **Unit/integration tests**: `cargo test` — uses `wiremock` crate for HTTP mocking
-- **Benchmarks**: `cargo bench` — uses `criterion` for throughput measurement
-- **Load tests**: `scripts/load_test.sh` — uses k6 against running instance
-- **Docker tests**: `docker compose up` — full stack with mock services
+- `cargo test` — unit tests for `AppConfig::from_env` (happy path + missing
+  required var).
+- `cargo clippy -- -D warnings` — must be clean.
+- End-to-end smoke: `docker build && docker run` against a live
+  `conversation-chat`.
 
-## Downstream Services
+## Out of Scope
 
-| Service | Language | What We Call |
-|---------|----------|--------------|
-| Tenant Service | Go + Gin | `GET /api/v1/tenants/:id`, `GET /internal/resolve-channel` |
-| Agent Config Registry | Go + Gin | `GET /api/v1/tenants/:id/profiles/:pid/configs/active` |
-| OpenAI API | — | `POST /v1/chat/completions` |
-| Telegram Bot API | — | `POST /bot<TOKEN>/sendMessage` |
-| WhatsApp Graph API | — | `POST /v18.0/<PNID>/messages` |
+Session persistence, tool execution, LLM calls from inside chat-orch,
+channel webhooks, webhook signature verification, auth middleware, rate
+limiting, metrics, OpenTelemetry, retries, circuit breakers.

@@ -1,132 +1,135 @@
-// Task 3: Full implementation pending
-// This module loads AppConfig from environment variables via dotenvy.
+use crate::error::AppError;
 
-/// Application configuration loaded from environment variables.
-///
-/// All required variables must be set or the service panics on startup.
-/// See .env.example for the complete list.
+#[derive(Debug, Clone)]
 pub struct AppConfig {
-    // Server
     pub server_host: String,
     pub server_port: u16,
-    pub max_concurrency: usize,
-
-    // Redis
-    pub redis_url: String,
-    pub session_ttl_secs: u64,
-    pub dedup_ttl_secs: u64,
-
-    // Downstream services
+    pub conversation_chat_url: String,
     pub tenant_service_url: String,
-    pub acr_service_url: String,
-    pub http_pool_size: usize,
-
-    // LLM
+    pub hospital_mock_url: String,
+    pub metricas_url: Option<String>,
+    pub telegram_bot_token: Option<String>,
+    pub telegram_default_tenant_id: Option<String>,
+    pub cors_allow_origin: String,
     pub openai_api_key: String,
     pub openai_base_url: String,
     pub openai_default_model: String,
-
-    // Telegram
-    pub telegram_bot_token: Option<String>,
-    pub telegram_webhook_secret: Option<String>,
-    pub telegram_use_polling: bool,
-
-    // WhatsApp
-    pub whatsapp_access_token: Option<String>,
-    pub whatsapp_verify_token: Option<String>,
-    pub whatsapp_app_secret: Option<String>,
-    pub whatsapp_api_version: String,
-
-    // JWT
-    pub jwt_secret: String,
-    pub jwt_issuer: String,
-
-    // Caches
-    pub channel_cache_ttl_secs: u64,
-    pub channel_cache_max_entries: u64,
-    pub config_cache_ttl_secs: u64,
-    pub config_cache_max_entries: u64,
-
-    // Observability
+    pub agent_runtime_url: Option<String>,
+    pub rust_log: String,
     pub log_format: String,
-
-    // Internal endpoint auth
-    pub metrics_api_key: Option<String>,
-
-    // WhatsApp static tenant map (MVP workaround)
-    pub whatsapp_static_tenant_map: Option<String>,
 }
 
 impl AppConfig {
-    /// Load configuration from environment variables.
-    ///
-    /// Panics with a descriptive error if a required variable is missing.
-    pub fn from_env() -> anyhow::Result<Self> {
+    pub fn from_env() -> Result<Self, AppError> {
         Ok(Self {
-            // Server
             server_host: env_or("SERVER_HOST", "0.0.0.0"),
-            server_port: env_or("SERVER_PORT", "3000").parse()?,
-            max_concurrency: env_or("MAX_CONCURRENCY", "10000").parse()?,
-
-            // Redis
-            redis_url: env_required("REDIS_URL")?,
-            session_ttl_secs: env_or("SESSION_TTL_SECS", "1800").parse()?,
-            dedup_ttl_secs: env_or("DEDUP_TTL_SECS", "86400").parse()?,
-
-            // Downstream
-            tenant_service_url: env_required("TENANT_SERVICE_URL")?,
-            acr_service_url: env_required("ACR_SERVICE_URL")?,
-            http_pool_size: env_or("HTTP_POOL_SIZE", "2000").parse()?,
-
-            // LLM
-            openai_api_key: env_required("OPENAI_API_KEY")?,
-            openai_base_url: env_or("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            openai_default_model: env_or("OPENAI_DEFAULT_MODEL", "gpt-4o"),
-
-            // Telegram
-            telegram_bot_token: env_opt("TELEGRAM_BOT_TOKEN"),
-            telegram_webhook_secret: env_opt("TELEGRAM_WEBHOOK_SECRET"),
-            telegram_use_polling: env_or("TELEGRAM_USE_POLLING", "false")
+            server_port: env_or("SERVER_PORT", "3000")
                 .parse()
-                .unwrap_or(false),
-
-            // WhatsApp
-            whatsapp_access_token: env_opt("WHATSAPP_ACCESS_TOKEN"),
-            whatsapp_verify_token: env_opt("WHATSAPP_VERIFY_TOKEN"),
-            whatsapp_app_secret: env_opt("WHATSAPP_APP_SECRET"),
-            whatsapp_api_version: env_or("WHATSAPP_API_VERSION", "v18.0"),
-
-            // JWT
-            jwt_secret: env_required("JWT_SECRET")?,
-            jwt_issuer: env_or("JWT_ISSUER", "tenant-service"),
-
-            // Caches
-            channel_cache_ttl_secs: env_or("CHANNEL_CACHE_TTL_SECS", "300").parse()?,
-            channel_cache_max_entries: env_or("CHANNEL_CACHE_MAX_ENTRIES", "100000").parse()?,
-            config_cache_ttl_secs: env_or("CONFIG_CACHE_TTL_SECS", "120").parse()?,
-            config_cache_max_entries: env_or("CONFIG_CACHE_MAX_ENTRIES", "50000").parse()?,
-
-            // Observability
+                .map_err(|e: std::num::ParseIntError| {
+                    AppError::Internal(format!("SERVER_PORT not a valid u16: {e}"))
+                })?,
+            conversation_chat_url: env_required("CONVERSATION_CHAT_URL")?,
+            tenant_service_url: env_required("TENANT_SERVICE_URL")?,
+            hospital_mock_url: env_or("HOSPITAL_MOCK_URL", "http://hospital-mock:8080"),
+            metricas_url: env_opt("METRICAS_URL"),
+            telegram_bot_token: env_opt("TELEGRAM_BOT_TOKEN"),
+            telegram_default_tenant_id: env_opt("TELEGRAM_DEFAULT_TENANT_ID"),
+            cors_allow_origin: env_or("CORS_ALLOW_ORIGIN", "http://localhost:3000"),
+            openai_api_key: env_required("OPENAI_API_KEY")?,
+            openai_base_url: env_or("OPENAI_BASE_URL", "https://openrouter.ai/api/v1"),
+            openai_default_model: env_or(
+                "OPENAI_DEFAULT_MODEL",
+                "nvidia/nemotron-3-super-120b-a12b:free",
+            ),
+            agent_runtime_url: env_opt("AGENT_RUNTIME_URL"),
+            rust_log: env_or("RUST_LOG", "chat_orch=info,tower_http=info"),
             log_format: env_or("LOG_FORMAT", "pretty"),
-
-            // Internal endpoint auth (fail-closed: 403 if not configured)
-            metrics_api_key: env_opt("METRICS_API_KEY"),
-
-            // WhatsApp static tenant map (MVP workaround — JSON array)
-            // Format: [{"phone_number_id":"...","tenant_id":"...","tenant_slug":"...","agent_profile_id":"..."}]
-            whatsapp_static_tenant_map: env_opt("WHATSAPP_STATIC_TENANT_MAP"),
         })
     }
 }
 
-fn env_required(key: &str) -> anyhow::Result<String> {
-    std::env::var(key).map_err(|_| anyhow::anyhow!("required env var {key} is not set"))
+fn env_required(key: &str) -> Result<String, AppError> {
+    match std::env::var(key) {
+        Ok(v) if !v.is_empty() => Ok(v),
+        _ => Err(AppError::MissingEnv(key.to_string())),
+    }
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 fn env_opt(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Use a dedicated mutex so concurrent tests don't race on process-wide env.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn set_required() {
+        std::env::set_var("CONVERSATION_CHAT_URL", "http://conversation-chat:8082");
+        std::env::set_var("TENANT_SERVICE_URL", "http://tenant:8080");
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+    }
+
+    fn clear_all() {
+        for k in [
+            "SERVER_HOST",
+            "SERVER_PORT",
+            "CONVERSATION_CHAT_URL",
+            "TENANT_SERVICE_URL",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "OPENAI_DEFAULT_MODEL",
+            "RUST_LOG",
+            "LOG_FORMAT",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+
+    #[test]
+    fn from_env_happy_path_applies_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        set_required();
+
+        let cfg = AppConfig::from_env().expect("config should load");
+        assert_eq!(cfg.server_host, "0.0.0.0");
+        assert_eq!(cfg.server_port, 3000);
+        assert_eq!(cfg.conversation_chat_url, "http://conversation-chat:8082");
+        assert_eq!(cfg.tenant_service_url, "http://tenant:8080");
+        assert_eq!(cfg.openai_api_key, "sk-test");
+        assert_eq!(cfg.openai_base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(
+            cfg.openai_default_model,
+            "nvidia/nemotron-3-super-120b-a12b:free"
+        );
+        assert_eq!(cfg.log_format, "pretty");
+
+        clear_all();
+    }
+
+    #[test]
+    fn from_env_missing_conversation_chat_url_errors() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        std::env::set_var("TENANT_SERVICE_URL", "http://tenant:8080");
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+
+        let err = AppConfig::from_env().expect_err("should fail without CONVERSATION_CHAT_URL");
+        match err {
+            AppError::MissingEnv(k) => assert_eq!(k, "CONVERSATION_CHAT_URL"),
+            other => panic!("expected MissingEnv, got {other:?}"),
+        }
+
+        clear_all();
+    }
 }
