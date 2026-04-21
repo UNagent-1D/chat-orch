@@ -14,6 +14,7 @@ pub struct AppConfig {
     pub openai_api_key: String,
     pub openai_base_url: String,
     pub openai_default_model: String,
+    pub agent_runtime_url: Option<String>,
     pub rust_log: String,
     pub log_format: String,
 }
@@ -40,6 +41,7 @@ impl AppConfig {
                 "OPENAI_DEFAULT_MODEL",
                 "nvidia/nemotron-3-super-120b-a12b:free",
             ),
+            agent_runtime_url: env_opt("AGENT_RUNTIME_URL"),
             rust_log: env_or("RUST_LOG", "chat_orch=info,tower_http=info"),
             log_format: env_or("LOG_FORMAT", "pretty"),
         })

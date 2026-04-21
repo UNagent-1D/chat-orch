@@ -20,5 +20,6 @@ pub struct AppState {
     pub hospital: Arc<hospital::HospitalClient>,
     pub sessions: Arc<session::SessionStore>,
     pub metricas: Option<gateway::MetricasClient>,
+    pub agent_runtime: Option<gateway::ConversationChatClient>,
     pub hub: Arc<sse::SseHub>,
 }

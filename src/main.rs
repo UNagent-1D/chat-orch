@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chat_orch::config::AppConfig;
-use chat_orch::gateway::{MetricasClient, TelegramClient};
+use chat_orch::gateway::{ConversationChatClient, MetricasClient, TelegramClient};
 use chat_orch::hospital::HospitalClient;
 use chat_orch::llm::LlmClient;
 use chat_orch::session::SessionStore;
@@ -48,6 +48,11 @@ async fn main() -> Result<()> {
 
     let hub = SseHub::new();
 
+    let agent_runtime = config
+        .agent_runtime_url
+        .clone()
+        .map(|url| ConversationChatClient::new(http.clone(), url));
+
     if let (Some(token), Some(tenant_id)) = (
         config.telegram_bot_token.clone(),
         config.telegram_default_tenant_id.clone(),
@@ -83,6 +88,7 @@ async fn main() -> Result<()> {
         hospital,
         sessions,
         metricas,
+        agent_runtime,
         hub,
     };
 

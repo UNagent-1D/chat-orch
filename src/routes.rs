@@ -77,19 +77,40 @@ async fn chat_forward(
         metricas.record_turn(req.tenant_id.clone(), req.message.clone(), false);
     }
 
-    let sid = match req.session_id {
-        Some(id) if !id.trim().is_empty() => id,
-        _ => SessionStore::new_session_id(),
-    };
+    // Extract session_id first so it can be moved in exactly one branch.
+    let session_id = req.session_id;
 
-    let (reply_text, resolved) = run_turn(
-        &state.llm,
-        &state.hospital,
-        &state.sessions,
-        &sid,
-        &req.message,
-    )
-    .await;
+    let (sid, reply_text) = if let Some(ar) = &state.agent_runtime {
+        let sid = match session_id.filter(|s| !s.trim().is_empty()) {
+            Some(id) => id,
+            None => ar.create_session(&req.tenant_id).await?,
+        };
+        let resp = ar.post_turn(&sid, &req.message).await?;
+        let text = resp["message"]["text"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        (sid, text)
+    } else {
+        let sid = match session_id {
+            Some(id) if !id.trim().is_empty() => id,
+            _ => SessionStore::new_session_id(),
+        };
+        let (text, resolved) = run_turn(
+            &state.llm,
+            &state.hospital,
+            &state.sessions,
+            &sid,
+            &req.message,
+        )
+        .await;
+        if resolved {
+            if let Some(metricas) = &state.metricas {
+                metricas.record_turn(req.tenant_id.clone(), req.message.clone(), true);
+            }
+        }
+        (sid, text)
+    };
 
     if !reply_text.is_empty() {
         state.hub.publish(
@@ -99,12 +120,6 @@ async fn chat_forward(
                 text: reply_text.clone(),
             },
         );
-    }
-
-    if resolved {
-        if let Some(metricas) = &state.metricas {
-            metricas.record_turn(req.tenant_id.clone(), req.message.clone(), true);
-        }
     }
 
     Ok(Json(ChatResponse {
