@@ -10,6 +10,7 @@ pub mod runtime;
 pub mod session;
 pub mod sse;
 pub mod telegram;
+pub mod types;
 
 pub use error::AppError;
 

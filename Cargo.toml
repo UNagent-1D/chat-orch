@@ -13,7 +13,6 @@ tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
-uuid = { version = "1", features = ["v4"] }
 
 # HTTP client (downstream: conversation-chat)
 reqwest = { version = "0.12", default-features = false, features = [
@@ -35,6 +34,27 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Error handling
 thiserror = "1"
 anyhow = "1"
+
+# Async utilities
+async-trait = "0.1"
+futures = "0.3"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Identifiers
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["async_tokio"] }
+http-body-util = "0.1"
+
+# Bench target added in PR 8 (feat/08-docker-tests) when benches/throughput.rs lands.
+# [[bench]]
+# name = "throughput"
+# harness = false
 
 [profile.release]
 lto = true
