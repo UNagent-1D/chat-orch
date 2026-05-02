@@ -36,11 +36,8 @@ impl AppConfig {
             telegram_default_tenant_id: env_opt("TELEGRAM_DEFAULT_TENANT_ID"),
             cors_allow_origin: env_or("CORS_ALLOW_ORIGIN", "http://localhost:3000"),
             openai_api_key: env_required("OPENAI_API_KEY")?,
-            openai_base_url: env_or("OPENAI_BASE_URL", "https://openrouter.ai/api/v1"),
-            openai_default_model: env_or(
-                "OPENAI_DEFAULT_MODEL",
-                "nvidia/nemotron-3-super-120b-a12b:free",
-            ),
+            openai_base_url: env_required("OPENAI_BASE_URL")?,
+            openai_default_model: env_required("OPENAI_DEFAULT_MODEL")?,
             agent_runtime_url: env_opt("AGENT_RUNTIME_URL"),
             rust_log: env_or("RUST_LOG", "chat_orch=info,tower_http=info"),
             log_format: env_or("LOG_FORMAT", "pretty"),
@@ -77,6 +74,8 @@ mod tests {
         std::env::set_var("CONVERSATION_CHAT_URL", "http://conversation-chat:8082");
         std::env::set_var("TENANT_SERVICE_URL", "http://tenant:8080");
         std::env::set_var("OPENAI_API_KEY", "sk-test");
+        std::env::set_var("OPENAI_BASE_URL", "http://llm-test/v1");
+        std::env::set_var("OPENAI_DEFAULT_MODEL", "test-model");
     }
 
     fn clear_all() {
@@ -107,12 +106,27 @@ mod tests {
         assert_eq!(cfg.conversation_chat_url, "http://conversation-chat:8082");
         assert_eq!(cfg.tenant_service_url, "http://tenant:8080");
         assert_eq!(cfg.openai_api_key, "sk-test");
-        assert_eq!(cfg.openai_base_url, "https://openrouter.ai/api/v1");
-        assert_eq!(
-            cfg.openai_default_model,
-            "nvidia/nemotron-3-super-120b-a12b:free"
-        );
+        assert_eq!(cfg.openai_base_url, "http://llm-test/v1");
+        assert_eq!(cfg.openai_default_model, "test-model");
         assert_eq!(cfg.log_format, "pretty");
+
+        clear_all();
+    }
+
+    #[test]
+    fn from_env_missing_openai_default_model_errors() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_all();
+        std::env::set_var("CONVERSATION_CHAT_URL", "http://conversation-chat:8082");
+        std::env::set_var("TENANT_SERVICE_URL", "http://tenant:8080");
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+        std::env::set_var("OPENAI_BASE_URL", "http://llm-test/v1");
+
+        let err = AppConfig::from_env().expect_err("should fail without OPENAI_DEFAULT_MODEL");
+        match err {
+            AppError::MissingEnv(k) => assert_eq!(k, "OPENAI_DEFAULT_MODEL"),
+            other => panic!("expected MissingEnv, got {other:?}"),
+        }
 
         clear_all();
     }
