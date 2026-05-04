@@ -186,6 +186,24 @@ struct TurnBody<'a> {
     message: &'a str,
 }
 
+#[derive(Serialize)]
+struct SubmitJobBody<'a> {
+    session_id: &'a str,
+    message: &'a str,
+    chat_id: i64,
+    tenant_id: &'a str,
+}
+
+#[derive(Deserialize)]
+struct SubmitJobResponse {
+    job_id: String,
+}
+
+#[derive(Deserialize)]
+struct JobResultResponse {
+    text: String,
+}
+
 impl ConversationChatClient {
     pub fn new(http: Client, base_url: String) -> Self {
         Self { http, base_url }
@@ -242,5 +260,73 @@ impl ConversationChatClient {
 
         let body: serde_json::Value = response.json().await?;
         Ok(body)
+    }
+
+    /// Submits an async job to the broker via agent-runtime.
+    /// Returns the job_id assigned to this request.
+    pub async fn submit_job(
+        &self,
+        session_id: &str,
+        message: &str,
+        chat_id: i64,
+        tenant_id: &str,
+    ) -> Result<String, AppError> {
+        let url = format!("{}/api/v1/jobs", self.base_url.trim_end_matches('/'));
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth("internal")
+            .json(&SubmitJobBody { session_id, message, chat_id, tenant_id })
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::Downstream(format!(
+                "POST {url} returned {status}: {}",
+                body.chars().take(200).collect::<String>()
+            )));
+        }
+
+        let parsed: SubmitJobResponse = response.json().await?;
+        Ok(parsed.job_id)
+    }
+
+    /// Long-polls agent-runtime for a job result.
+    /// Returns `Some(text)` when the result is ready, or `None` if the
+    /// agent-runtime returned 408 (timeout elapsed on its side).
+    pub async fn wait_for_job(
+        &self,
+        job_id: &str,
+        timeout_ms: u64,
+    ) -> Result<Option<String>, AppError> {
+        let url = format!(
+            "{}/api/v1/jobs/{job_id}/wait",
+            self.base_url.trim_end_matches('/')
+        );
+        let response = self
+            .http
+            .get(&url)
+            .query(&[("timeout", timeout_ms)])
+            // Client-side timeout: give a 5 s buffer above the server-side one
+            .timeout(std::time::Duration::from_millis(timeout_ms + 5_000))
+            .send()
+            .await?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::REQUEST_TIMEOUT {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::Downstream(format!(
+                "GET {url} returned {status}: {}",
+                body.chars().take(200).collect::<String>()
+            )));
+        }
+
+        let parsed: JobResultResponse = response.json().await?;
+        Ok(Some(parsed.text))
     }
 }

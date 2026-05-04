@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
         config.telegram_default_tenant_id.clone(),
     ) {
         let telegram = TelegramClient::new(http.clone(), &token);
+        let ar_for_telegram = agent_runtime.clone().map(Arc::new);
         TelegramLoop::new(
             telegram,
             llm.clone(),
@@ -65,6 +66,7 @@ async fn main() -> Result<()> {
             sessions.clone(),
             metricas.clone(),
             tenant_id,
+            ar_for_telegram,
         )
         .spawn();
     } else {
