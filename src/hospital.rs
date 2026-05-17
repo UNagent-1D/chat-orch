@@ -2,12 +2,14 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::channel::Channel;
 use crate::error::AppError;
 
 #[derive(Clone)]
 pub struct HospitalClient {
     http: Client,
     base_url: String,
+    channel: Channel,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -18,8 +20,12 @@ pub struct ToolDef {
 }
 
 impl HospitalClient {
-    pub fn new(http: Client, base_url: String) -> Self {
-        Self { http, base_url }
+    pub fn new(http: Client, base_url: String, channel: Channel) -> Self {
+        Self {
+            http,
+            base_url,
+            channel,
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -99,21 +105,43 @@ impl HospitalClient {
     }
 
     async fn send_get(&self, url: &str, query: &[(&str, String)]) -> Result<Value, AppError> {
-        let resp = self.http.get(url).query(query).send().await?;
-        Self::decode(resp, url).await
+        // GET — no body to seal, but we still tag the request with the secure
+        // channel header so the callee knows to encrypt its response.
+        let mut req = self.http.get(url).query(query);
+        if self.channel.active() {
+            req = req.header(crate::channel::HEADER_NAME, crate::channel::HEADER_VALUE);
+        }
+        let resp = req.send().await?;
+        self.decode(resp, url).await
     }
 
     async fn send_post(&self, url: &str, body: &Value) -> Result<Value, AppError> {
-        let resp = self.http.post(url).json(body).send().await?;
-        Self::decode(resp, url).await
+        let req = self.http.post(url);
+        let req = self.channel.apply_request(req, body)?;
+        let resp = req.send().await?;
+        self.decode(resp, url).await
     }
 
-    async fn decode(resp: reqwest::Response, url: &str) -> Result<Value, AppError> {
+    /// Read the response, decrypt if needed, and surface non-2xx as a
+    /// `Value` so the LLM sees the error structure rather than blowing up.
+    async fn decode(&self, resp: reqwest::Response, url: &str) -> Result<Value, AppError> {
         let status = resp.status();
-        let body: Value = resp.json().await.unwrap_or_else(|_| json!({}));
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let bytes = resp.bytes().await?;
+        let plain = self
+            .channel
+            .open_bytes(content_type.as_deref(), &bytes)
+            .unwrap_or_else(|_| bytes.to_vec());
+        let body: Value = if plain.is_empty() {
+            json!({})
+        } else {
+            serde_json::from_slice(&plain).unwrap_or_else(|_| json!({}))
+        };
         if !status.is_success() {
-            // Surface the error body to the LLM — hospital-mock returns
-            // {"error": "..."} shapes that the model can reason about.
             return Ok(json!({
                 "error": true,
                 "status": status.as_u16(),

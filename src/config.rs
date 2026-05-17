@@ -15,6 +15,8 @@ pub struct AppConfig {
     pub openai_base_url: String,
     pub openai_default_model: String,
     pub agent_runtime_url: Option<String>,
+    pub backend_channel_key: Option<String>,
+    pub backend_channel_enabled: bool,
     pub rust_log: String,
     pub log_format: String,
 }
@@ -39,6 +41,9 @@ impl AppConfig {
             openai_base_url: env_required("OPENAI_BASE_URL")?,
             openai_default_model: env_required("OPENAI_DEFAULT_MODEL")?,
             agent_runtime_url: env_opt("AGENT_RUNTIME_URL"),
+            backend_channel_key: env_opt("BACKEND_CHANNEL_KEY"),
+            backend_channel_enabled: env_or("BACKEND_CHANNEL_ENABLED", "false")
+                .eq_ignore_ascii_case("true"),
             rust_log: env_or("RUST_LOG", "chat_orch=info,tower_http=info"),
             log_format: env_or("LOG_FORMAT", "pretty"),
         })
