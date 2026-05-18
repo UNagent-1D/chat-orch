@@ -8,6 +8,7 @@ use chat_orch::config::AppConfig;
 use chat_orch::gateway::{ConversationChatClient, MetricasClient, TelegramClient};
 use chat_orch::hospital::HospitalClient;
 use chat_orch::llm::LlmClient;
+use chat_orch::rate_limit::{LimiterSettings, Limiters};
 use chat_orch::session::SessionStore;
 use chat_orch::sse::SseHub;
 use chat_orch::telegram::TelegramLoop;
@@ -100,6 +101,16 @@ async fn main() -> Result<()> {
             )
         })?;
 
+    let limiter_settings = LimiterSettings::from_env();
+    tracing::info!(
+        chat_burst = limiter_settings.chat_burst,
+        chat_per_sec = limiter_settings.chat_per_sec,
+        feedback_burst = limiter_settings.feedback_burst,
+        feedback_per_sec = limiter_settings.feedback_per_sec,
+        "rate limiter initialised"
+    );
+    let limiters = Arc::new(Limiters::from_settings(&limiter_settings));
+
     let state = AppState {
         config: Arc::new(config),
         llm,
@@ -108,6 +119,7 @@ async fn main() -> Result<()> {
         metricas,
         agent_runtime,
         hub,
+        limiters,
     };
 
     let app = routes::build_router(state);

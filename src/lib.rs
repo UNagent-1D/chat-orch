@@ -6,6 +6,7 @@ pub mod error;
 pub mod gateway;
 pub mod hospital;
 pub mod llm;
+pub mod rate_limit;
 pub mod routes;
 pub mod runtime;
 pub mod session;
@@ -24,4 +25,5 @@ pub struct AppState {
     pub metricas: Option<gateway::MetricasClient>,
     pub agent_runtime: Option<gateway::ConversationChatClient>,
     pub hub: Arc<sse::SseHub>,
+    pub limiters: Arc<rate_limit::Limiters>,
 }
