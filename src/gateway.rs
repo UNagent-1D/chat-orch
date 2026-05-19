@@ -164,6 +164,43 @@ impl MetricasClient {
         });
     }
 
+    /// Fire-and-forget audit emission for a rate-limit rejection.
+    ///
+    /// Posts to Compliance `/v1/event` so the 429 is persisted in the
+    /// `audit_logs` collection. Used by the chat-orch handlers when the
+    /// token bucket denies a request. Failures are logged and dropped:
+    /// audit telemetry must never block the request path.
+    pub fn record_rate_limit(&self, tenant_id: String, scope: &'static str, retry_after_secs: u64) {
+        let http = self.http.clone();
+        let channel = self.channel.clone();
+        let url = format!("{}/v1/event", self.base_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "level": "WARN",
+            "tenant_id": tenant_id,
+            "component": "chat-orch",
+            "action": "RATE_LIMITED",
+            "metadata": {
+                "scope": scope,
+                "retry_after_secs": retry_after_secs,
+            }
+        });
+        tokio::spawn(async move {
+            let req = http.post(&url);
+            let req = match channel.apply_request(req, &body) {
+                Ok(r) => r,
+                Err(err) => {
+                    tracing::warn!(error=%err, %url, "compliance rate-limit seal failed");
+                    return;
+                }
+            };
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {}
+                Ok(resp) => tracing::warn!(status=%resp.status(), %url, "compliance rate-limit non-2xx"),
+                Err(err) => tracing::warn!(error=%err, %url, "compliance rate-limit failed"),
+            }
+        });
+    }
+
     /// Fire-and-forget CSAT feedback emission.
     pub fn record_feedback(&self, tenant_id: String, score: u8) {
         let http = self.http.clone();

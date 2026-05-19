@@ -74,13 +74,17 @@ async fn chat_forward(
     }
 
     if let Err(retry_after) = state.limiters.tenant_chat.check(&req.tenant_id) {
+        let retry_secs = retry_after.as_secs().max(1);
         tracing::warn!(
             tenant_id = %req.tenant_id,
-            retry_after_secs = retry_after.as_secs(),
+            retry_after_secs = retry_secs,
             "rate_limited_chat"
         );
+        if let Some(metricas) = &state.metricas {
+            metricas.record_rate_limit(req.tenant_id.clone(), "chat", retry_secs);
+        }
         return Err(AppError::TooManyRequests {
-            retry_after_secs: retry_after.as_secs().max(1),
+            retry_after_secs: retry_secs,
             scope: "chat",
         });
     }
@@ -161,13 +165,17 @@ async fn submit_feedback(
         ));
     }
     if let Err(retry_after) = state.limiters.tenant_feedback.check(&req.tenant_id) {
+        let retry_secs = retry_after.as_secs().max(1);
         tracing::warn!(
             tenant_id = %req.tenant_id,
-            retry_after_secs = retry_after.as_secs(),
+            retry_after_secs = retry_secs,
             "rate_limited_feedback"
         );
+        if let Some(metricas) = &state.metricas {
+            metricas.record_rate_limit(req.tenant_id.clone(), "feedback", retry_secs);
+        }
         return Err(AppError::TooManyRequests {
-            retry_after_secs: retry_after.as_secs().max(1),
+            retry_after_secs: retry_secs,
             scope: "feedback",
         });
     }
