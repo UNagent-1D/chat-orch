@@ -1,18 +1,21 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::channel::Channel;
 use crate::error::AppError;
 
 #[derive(Clone)]
 pub struct ConversationChatClient {
     http: Client,
     base_url: String,
+    channel: Channel,
 }
 
 #[derive(Clone)]
 pub struct MetricasClient {
     http: Client,
     base_url: String,
+    channel: Channel,
 }
 
 #[derive(Clone)]
@@ -123,26 +126,37 @@ struct MetricasChatBody<'a> {
 }
 
 impl MetricasClient {
-    pub fn new(http: Client, base_url: String) -> Self {
-        Self { http, base_url }
+    pub fn new(http: Client, base_url: String, channel: Channel) -> Self {
+        Self {
+            http,
+            base_url,
+            channel,
+        }
     }
 
     /// Fire-and-forget — logs a warning on failure and never returns an error.
     /// Spawned onto the tokio runtime so request latency is unaffected.
     pub fn record_turn(&self, tenant_id: String, message: String, resolved: bool) {
         let http = self.http.clone();
+        let channel = self.channel.clone();
         let url = format!(
             "{}/conversation/chat",
             self.base_url.trim_end_matches('/')
         );
         tokio::spawn(async move {
-            let result = http
-                .post(&url)
-                .header("X-Tenant-ID", &tenant_id)
-                .json(&MetricasChatBody { message: &message, resolved })
-                .send()
-                .await;
-            match result {
+            let body = MetricasChatBody {
+                message: &message,
+                resolved,
+            };
+            let req = http.post(&url).header("X-Tenant-ID", &tenant_id);
+            let req = match channel.apply_request(req, &body) {
+                Ok(r) => r,
+                Err(err) => {
+                    tracing::warn!(error=%err, %url, "metricas emit seal failed");
+                    return;
+                }
+            };
+            match req.send().await {
                 Ok(resp) if resp.status().is_success() => {}
                 Ok(resp) => tracing::warn!(status=%resp.status(), %url, "metricas emit non-2xx"),
                 Err(err) => tracing::warn!(error=%err, %url, "metricas emit failed"),
@@ -150,19 +164,59 @@ impl MetricasClient {
         });
     }
 
+    /// Fire-and-forget audit emission for a rate-limit rejection.
+    ///
+    /// Posts to Compliance `/v1/event` so the 429 is persisted in the
+    /// `audit_logs` collection. Used by the chat-orch handlers when the
+    /// token bucket denies a request. Failures are logged and dropped:
+    /// audit telemetry must never block the request path.
+    pub fn record_rate_limit(&self, tenant_id: String, scope: &'static str, retry_after_secs: u64) {
+        let http = self.http.clone();
+        let channel = self.channel.clone();
+        let url = format!("{}/v1/event", self.base_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "level": "WARN",
+            "tenant_id": tenant_id,
+            "component": "chat-orch",
+            "action": "RATE_LIMITED",
+            "metadata": {
+                "scope": scope,
+                "retry_after_secs": retry_after_secs,
+            }
+        });
+        tokio::spawn(async move {
+            let req = http.post(&url);
+            let req = match channel.apply_request(req, &body) {
+                Ok(r) => r,
+                Err(err) => {
+                    tracing::warn!(error=%err, %url, "compliance rate-limit seal failed");
+                    return;
+                }
+            };
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {}
+                Ok(resp) => tracing::warn!(status=%resp.status(), %url, "compliance rate-limit non-2xx"),
+                Err(err) => tracing::warn!(error=%err, %url, "compliance rate-limit failed"),
+            }
+        });
+    }
+
     /// Fire-and-forget CSAT feedback emission.
     pub fn record_feedback(&self, tenant_id: String, score: u8) {
         let http = self.http.clone();
+        let channel = self.channel.clone();
         let url = format!("{}/feedback/csat", self.base_url.trim_end_matches('/'));
         let body = serde_json::json!({ "score": score });
         tokio::spawn(async move {
-            let result = http
-                .post(&url)
-                .header("X-Tenant-ID", &tenant_id)
-                .json(&body)
-                .send()
-                .await;
-            match result {
+            let req = http.post(&url).header("X-Tenant-ID", &tenant_id);
+            let req = match channel.apply_request(req, &body) {
+                Ok(r) => r,
+                Err(err) => {
+                    tracing::warn!(error=%err, %url, "metricas feedback seal failed");
+                    return;
+                }
+            };
+            match req.send().await {
                 Ok(resp) if resp.status().is_success() => {}
                 Ok(resp) => tracing::warn!(status=%resp.status(), %url, "metricas feedback non-2xx"),
                 Err(err) => tracing::warn!(error=%err, %url, "metricas feedback failed"),
@@ -205,30 +259,22 @@ struct JobResultResponse {
 }
 
 impl ConversationChatClient {
-    pub fn new(http: Client, base_url: String) -> Self {
-        Self { http, base_url }
+    pub fn new(http: Client, base_url: String, channel: Channel) -> Self {
+        Self {
+            http,
+            base_url,
+            channel,
+        }
     }
 
     pub async fn create_session(&self, tenant_id: &str) -> Result<String, AppError> {
         let url = format!("{}/api/v1/sessions", self.base_url.trim_end_matches('/'));
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth("internal")
-            .json(&CreateSessionBody { tenant_id })
-            .send()
-            .await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Downstream(format!(
-                "POST {url} returned {status}: {}",
-                body.chars().take(200).collect::<String>()
-            )));
-        }
-
-        let parsed: CreateSessionResponse = response.json().await?;
+        let req = self.http.post(&url).bearer_auth("internal");
+        let req = self
+            .channel
+            .apply_request(req, &CreateSessionBody { tenant_id })?;
+        let response = req.send().await?;
+        let parsed: CreateSessionResponse = self.channel.decode_response(response).await?;
         Ok(parsed.sid)
     }
 
@@ -241,24 +287,10 @@ impl ConversationChatClient {
             "{}/api/v1/sessions/{sid}/turns",
             self.base_url.trim_end_matches('/')
         );
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth("internal")
-            .json(&TurnBody { message })
-            .send()
-            .await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Downstream(format!(
-                "POST {url} returned {status}: {}",
-                body.chars().take(200).collect::<String>()
-            )));
-        }
-
-        let body: serde_json::Value = response.json().await?;
+        let req = self.http.post(&url).bearer_auth("internal");
+        let req = self.channel.apply_request(req, &TurnBody { message })?;
+        let response = req.send().await?;
+        let body: serde_json::Value = self.channel.decode_response(response).await?;
         Ok(body)
     }
 
@@ -272,24 +304,18 @@ impl ConversationChatClient {
         tenant_id: &str,
     ) -> Result<String, AppError> {
         let url = format!("{}/api/v1/jobs", self.base_url.trim_end_matches('/'));
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth("internal")
-            .json(&SubmitJobBody { session_id, message, chat_id, tenant_id })
-            .send()
-            .await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Downstream(format!(
-                "POST {url} returned {status}: {}",
-                body.chars().take(200).collect::<String>()
-            )));
-        }
-
-        let parsed: SubmitJobResponse = response.json().await?;
+        let req = self.http.post(&url).bearer_auth("internal");
+        let req = self.channel.apply_request(
+            req,
+            &SubmitJobBody {
+                session_id,
+                message,
+                chat_id,
+                tenant_id,
+            },
+        )?;
+        let response = req.send().await?;
+        let parsed: SubmitJobResponse = self.channel.decode_response(response).await?;
         Ok(parsed.job_id)
     }
 
@@ -305,28 +331,25 @@ impl ConversationChatClient {
             "{}/api/v1/jobs/{job_id}/wait",
             self.base_url.trim_end_matches('/')
         );
-        let response = self
+        // GET — no body to seal, but we still tag the request with the secure
+        // channel header so the callee knows to encrypt its response. Client-
+        // side timeout has a 5 s buffer above the server-side one so we never
+        // abandon a result mid-flight.
+        let mut req = self
             .http
             .get(&url)
             .query(&[("timeout", timeout_ms)])
-            // Client-side timeout: give a 5 s buffer above the server-side one
-            .timeout(std::time::Duration::from_millis(timeout_ms + 5_000))
-            .send()
-            .await?;
+            .bearer_auth("internal")
+            .timeout(std::time::Duration::from_millis(timeout_ms + 5_000));
+        if self.channel.active() {
+            req = req.header(crate::channel::HEADER_NAME, crate::channel::HEADER_VALUE);
+        }
+        let response = req.send().await?;
 
-        let status = response.status();
-        if status == reqwest::StatusCode::REQUEST_TIMEOUT {
+        if response.status() == reqwest::StatusCode::REQUEST_TIMEOUT {
             return Ok(None);
         }
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Downstream(format!(
-                "GET {url} returned {status}: {}",
-                body.chars().take(200).collect::<String>()
-            )));
-        }
-
-        let parsed: JobResultResponse = response.json().await?;
+        let parsed: JobResultResponse = self.channel.decode_response(response).await?;
         Ok(Some(parsed.text))
     }
 }

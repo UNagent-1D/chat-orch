@@ -73,6 +73,22 @@ async fn chat_forward(
         return Err(AppError::BadRequest("message is required".into()));
     }
 
+    if let Err(retry_after) = state.limiters.tenant_chat.check(&req.tenant_id) {
+        let retry_secs = retry_after.as_secs().max(1);
+        tracing::warn!(
+            tenant_id = %req.tenant_id,
+            retry_after_secs = retry_secs,
+            "rate_limited_chat"
+        );
+        if let Some(metricas) = &state.metricas {
+            metricas.record_rate_limit(req.tenant_id.clone(), "chat", retry_secs);
+        }
+        return Err(AppError::TooManyRequests {
+            retry_after_secs: retry_secs,
+            scope: "chat",
+        });
+    }
+
     if let Some(metricas) = &state.metricas {
         metricas.record_turn(req.tenant_id.clone(), req.message.clone(), false);
     }
@@ -147,6 +163,21 @@ async fn submit_feedback(
         return Err(AppError::BadRequest(
             "score must be between 1 and 5".into(),
         ));
+    }
+    if let Err(retry_after) = state.limiters.tenant_feedback.check(&req.tenant_id) {
+        let retry_secs = retry_after.as_secs().max(1);
+        tracing::warn!(
+            tenant_id = %req.tenant_id,
+            retry_after_secs = retry_secs,
+            "rate_limited_feedback"
+        );
+        if let Some(metricas) = &state.metricas {
+            metricas.record_rate_limit(req.tenant_id.clone(), "feedback", retry_secs);
+        }
+        return Err(AppError::TooManyRequests {
+            retry_after_secs: retry_secs,
+            scope: "feedback",
+        });
     }
     let _ = &req.session_id; // accepted but unused; metricas aggregates per tenant
     if let Some(metricas) = &state.metricas {

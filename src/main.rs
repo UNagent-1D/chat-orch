@@ -3,10 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chat_orch::channel::{Channel, ChannelKey};
 use chat_orch::config::AppConfig;
 use chat_orch::gateway::{ConversationChatClient, MetricasClient, TelegramClient};
 use chat_orch::hospital::HospitalClient;
 use chat_orch::llm::LlmClient;
+use chat_orch::rate_limit::{LimiterSettings, Limiters};
 use chat_orch::session::SessionStore;
 use chat_orch::sse::SseHub;
 use chat_orch::telegram::TelegramLoop;
@@ -27,6 +29,20 @@ async fn main() -> Result<()> {
         .build()
         .context("building reqwest client")?;
 
+    let channel_key = config
+        .backend_channel_key
+        .as_deref()
+        .map(ChannelKey::from_base64)
+        .transpose()
+        .context("decoding BACKEND_CHANNEL_KEY")?;
+    let channel = Channel::new(channel_key, config.backend_channel_enabled)
+        .context("constructing secure channel")?;
+    if channel.active() {
+        tracing::info!("secure channel enabled (AES-256-GCM)");
+    } else {
+        tracing::info!("secure channel disabled — backend traffic is plaintext");
+    }
+
     let llm = Arc::new(LlmClient::new(
         http.clone(),
         config.openai_base_url.clone(),
@@ -37,6 +53,7 @@ async fn main() -> Result<()> {
     let hospital = Arc::new(HospitalClient::new(
         http.clone(),
         config.hospital_mock_url.clone(),
+        channel.clone(),
     ));
 
     let sessions = SessionStore::new();
@@ -44,14 +61,14 @@ async fn main() -> Result<()> {
     let metricas = config
         .metricas_url
         .clone()
-        .map(|url| MetricasClient::new(http.clone(), url));
+        .map(|url| MetricasClient::new(http.clone(), url, channel.clone()));
 
     let hub = SseHub::new();
 
     let agent_runtime = config
         .agent_runtime_url
         .clone()
-        .map(|url| ConversationChatClient::new(http.clone(), url));
+        .map(|url| ConversationChatClient::new(http.clone(), url, channel.clone()));
 
     if let (Some(token), Some(tenant_id)) = (
         config.telegram_bot_token.clone(),
@@ -84,6 +101,16 @@ async fn main() -> Result<()> {
             )
         })?;
 
+    let limiter_settings = LimiterSettings::from_env();
+    tracing::info!(
+        chat_burst = limiter_settings.chat_burst,
+        chat_per_sec = limiter_settings.chat_per_sec,
+        feedback_burst = limiter_settings.feedback_burst,
+        feedback_per_sec = limiter_settings.feedback_per_sec,
+        "rate limiter initialised"
+    );
+    let limiters = Arc::new(Limiters::from_settings(&limiter_settings));
+
     let state = AppState {
         config: Arc::new(config),
         llm,
@@ -92,6 +119,7 @@ async fn main() -> Result<()> {
         metricas,
         agent_runtime,
         hub,
+        limiters,
     };
 
     let app = routes::build_router(state);
