@@ -25,11 +25,11 @@ impl AppConfig {
     pub fn from_env() -> Result<Self, AppError> {
         Ok(Self {
             server_host: env_or("SERVER_HOST", "0.0.0.0"),
-            server_port: env_or("SERVER_PORT", "3000")
-                .parse()
-                .map_err(|e: std::num::ParseIntError| {
+            server_port: env_or("SERVER_PORT", "3000").parse().map_err(
+                |e: std::num::ParseIntError| {
                     AppError::Internal(format!("SERVER_PORT not a valid u16: {e}"))
-                })?,
+                },
+            )?,
             conversation_chat_url: env_required("CONVERSATION_CHAT_URL")?,
             tenant_service_url: env_required("TENANT_SERVICE_URL")?,
             hospital_mock_url: env_or("HOSPITAL_MOCK_URL", "http://hospital-mock:8080"),

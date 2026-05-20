@@ -38,9 +38,9 @@ pub struct ChannelKey {
 
 impl ChannelKey {
     pub fn from_base64(s: &str) -> Result<Self, AppError> {
-        let decoded = B64.decode(s.trim()).map_err(|e| {
-            AppError::Internal(format!("BACKEND_CHANNEL_KEY invalid base64: {e}"))
-        })?;
+        let decoded = B64
+            .decode(s.trim())
+            .map_err(|e| AppError::Internal(format!("BACKEND_CHANNEL_KEY invalid base64: {e}")))?;
         if decoded.len() != 32 {
             return Err(AppError::Internal(format!(
                 "BACKEND_CHANNEL_KEY must decode to 32 bytes, got {}",
@@ -54,8 +54,7 @@ impl ChannelKey {
 
     pub fn seal(&self, plaintext: &[u8]) -> Result<Envelope, AppError> {
         let mut iv = [0u8; IV_LEN];
-        rand_bytes(&mut iv)
-            .map_err(|e| AppError::Internal(format!("rand_bytes: {e}")))?;
+        rand_bytes(&mut iv).map_err(|e| AppError::Internal(format!("rand_bytes: {e}")))?;
         let mut tag = [0u8; TAG_LEN];
         let ct = encrypt_aead(
             Cipher::aes_256_gcm(),
@@ -192,10 +191,7 @@ impl Channel {
             let plain = self
                 .open_bytes(content_type.as_deref(), &bytes)
                 .unwrap_or_else(|_| bytes.to_vec());
-            let preview: String = String::from_utf8_lossy(&plain)
-                .chars()
-                .take(200)
-                .collect();
+            let preview: String = String::from_utf8_lossy(&plain).chars().take(200).collect();
             return Err(AppError::Downstream(format!("status {status}: {preview}")));
         }
         let plain = self.open_bytes(content_type.as_deref(), &bytes)?;
@@ -313,8 +309,7 @@ mod tests {
     #[test]
     fn disabled_channel_passes_plaintext() {
         let channel = Channel::disabled();
-        let (bytes, ct, encrypted) =
-            channel.seal_json(&serde_json::json!({ "a": 1 })).unwrap();
+        let (bytes, ct, encrypted) = channel.seal_json(&serde_json::json!({ "a": 1 })).unwrap();
         assert!(!encrypted);
         assert_eq!(ct, "application/json");
         assert_eq!(bytes, b"{\"a\":1}");

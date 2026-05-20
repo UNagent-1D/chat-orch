@@ -139,10 +139,7 @@ impl MetricasClient {
     pub fn record_turn(&self, tenant_id: String, message: String, resolved: bool) {
         let http = self.http.clone();
         let channel = self.channel.clone();
-        let url = format!(
-            "{}/conversation/chat",
-            self.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/conversation/chat", self.base_url.trim_end_matches('/'));
         tokio::spawn(async move {
             let body = MetricasChatBody {
                 message: &message,
@@ -195,7 +192,9 @@ impl MetricasClient {
             };
             match req.send().await {
                 Ok(resp) if resp.status().is_success() => {}
-                Ok(resp) => tracing::warn!(status=%resp.status(), %url, "compliance rate-limit non-2xx"),
+                Ok(resp) => {
+                    tracing::warn!(status=%resp.status(), %url, "compliance rate-limit non-2xx")
+                }
                 Err(err) => tracing::warn!(error=%err, %url, "compliance rate-limit failed"),
             }
         });
@@ -218,7 +217,9 @@ impl MetricasClient {
             };
             match req.send().await {
                 Ok(resp) if resp.status().is_success() => {}
-                Ok(resp) => tracing::warn!(status=%resp.status(), %url, "metricas feedback non-2xx"),
+                Ok(resp) => {
+                    tracing::warn!(status=%resp.status(), %url, "metricas feedback non-2xx")
+                }
                 Err(err) => tracing::warn!(error=%err, %url, "metricas feedback failed"),
             }
         });
@@ -278,11 +279,7 @@ impl ConversationChatClient {
         Ok(parsed.sid)
     }
 
-    pub async fn post_turn(
-        &self,
-        sid: &str,
-        message: &str,
-    ) -> Result<serde_json::Value, AppError> {
+    pub async fn post_turn(&self, sid: &str, message: &str) -> Result<serde_json::Value, AppError> {
         let url = format!(
             "{}/api/v1/sessions/{sid}/turns",
             self.base_url.trim_end_matches('/')

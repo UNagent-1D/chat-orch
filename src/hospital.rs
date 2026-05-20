@@ -81,11 +81,8 @@ impl HospitalClient {
         let body = json!({
             "reason": args.get("reason").and_then(|x| x.as_str()).unwrap_or("not specified"),
         });
-        self.send_post(
-            &self.url(&format!("/appointments/{appt_id}/cancel")),
-            &body,
-        )
-        .await
+        self.send_post(&self.url(&format!("/appointments/{appt_id}/cancel")), &body)
+            .await
     }
 
     async fn get_patient_appointments(&self, args: &Value) -> Result<Value, AppError> {

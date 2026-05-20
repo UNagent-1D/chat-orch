@@ -102,10 +102,7 @@ async fn chat_forward(
             None => ar.create_session(&req.tenant_id).await?,
         };
         let resp = ar.post_turn(&sid, &req.message).await?;
-        let text = resp["message"]["text"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let text = resp["message"]["text"].as_str().unwrap_or("").to_string();
         (sid, text)
     } else {
         let sid = match session_id {
@@ -160,9 +157,7 @@ async fn submit_feedback(
         return Err(AppError::BadRequest("tenant_id is required".into()));
     }
     if req.score < 1 || req.score > 5 {
-        return Err(AppError::BadRequest(
-            "score must be between 1 and 5".into(),
-        ));
+        return Err(AppError::BadRequest("score must be between 1 and 5".into()));
     }
     if let Err(retry_after) = state.limiters.tenant_feedback.check(&req.tenant_id) {
         let retry_secs = retry_after.as_secs().max(1);

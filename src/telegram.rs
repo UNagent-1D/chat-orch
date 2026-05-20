@@ -97,9 +97,13 @@ impl TelegramLoop {
     }
 
     async fn handle_update(&self, update: TelegramUpdate) -> Result<(), crate::error::AppError> {
-        let Some(msg) = update.message else { return Ok(()); };
+        let Some(msg) = update.message else {
+            return Ok(());
+        };
         let chat_id = msg.chat.id;
-        let Some(text) = msg.text else { return Ok(()); };
+        let Some(text) = msg.text else {
+            return Ok(());
+        };
         if text.trim().is_empty() {
             return Ok(());
         }
@@ -148,7 +152,11 @@ impl TelegramLoop {
         match immediate {
             // Result arrived within the fast window — send directly.
             Ok(Ok(Some(reply))) => {
-                let out = if reply.trim().is_empty() { "…" } else { &reply };
+                let out = if reply.trim().is_empty() {
+                    "…"
+                } else {
+                    &reply
+                };
                 self.telegram.send_message(chat_id, out).await?;
             }
 
@@ -162,7 +170,11 @@ impl TelegramLoop {
                 tokio::spawn(async move {
                     match ar2.wait_for_job(&jid, BACKGROUND_WAIT_TIMEOUT_MS).await {
                         Ok(Some(reply)) => {
-                            let out = if reply.trim().is_empty() { "…" } else { &reply };
+                            let out = if reply.trim().is_empty() {
+                                "…"
+                            } else {
+                                &reply
+                            };
                             if let Err(e) = tg.send_message(chat_id, out).await {
                                 tracing::warn!(error=%e, "background telegram send failed");
                             }
@@ -208,7 +220,11 @@ impl TelegramLoop {
             }
         }
 
-        let out = if reply.trim().is_empty() { "…" } else { reply.as_str() };
+        let out = if reply.trim().is_empty() {
+            "…"
+        } else {
+            reply.as_str()
+        };
         self.telegram.send_message(chat_id, out).await?;
         Ok(())
     }
