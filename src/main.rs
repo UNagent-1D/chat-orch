@@ -84,6 +84,8 @@ async fn main() -> Result<()> {
             metricas.clone(),
             tenant_id,
             ar_for_telegram,
+            http.clone(),
+            config.conversation_chat_url.clone(),
         )
         .spawn();
     } else {
