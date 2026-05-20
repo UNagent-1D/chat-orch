@@ -1,0 +1,85 @@
+name: Deploy
+
+# Per-repo deploy for chat-orch.
+#
+# - Push to `main`                  → deploy to Railway `dev` environment.
+# - Manual dispatch with env=prod   → deploy to Railway `Production` environment.
+#
+# Prod is manual on purpose for now: the umbrella's old `pr-gate.yml` /
+# `deploy-prod.yml` flow assumed a single SHA across all services. Per-repo
+# deploys break that mental model and the cross-service gate replacement
+# hasn't been designed yet. Until it is, prod is one-click.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Target environment"
+        required: true
+        type: choice
+        default: dev
+        options:
+          - dev
+          - prod
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.env || 'dev' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-dev:
+    name: Railway / dev
+    if: github.event_name == 'push' || inputs.env == 'dev'
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_DEV }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy chat-orch to dev
+        run: railway up --service chat-orch --environment dev --detach
+
+      - name: Smoke /health
+        if: vars.RAILWAY_DEV_ORCH_URL != ''
+        run: |
+          curl --fail --retry 30 --retry-delay 10 --retry-all-errors -sS \
+               -o /dev/null -w "%{http_code}\n" \
+               "${{ vars.RAILWAY_DEV_ORCH_URL }}/health"
+
+  deploy-prod:
+    name: Railway / prod
+    if: github.event_name == 'workflow_dispatch' && inputs.env == 'prod'
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_PROD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy chat-orch to prod
+        run: railway up --service chat-orch --environment Production --detach
+
+      - name: Smoke /health
+        if: vars.RAILWAY_PROD_ORCH_URL != ''
+        run: |
+          curl --fail --retry 30 --retry-delay 10 --retry-all-errors -sS \
+               -o /dev/null -w "%{http_code}\n" \
+               "${{ vars.RAILWAY_PROD_ORCH_URL }}/health"
