@@ -15,7 +15,7 @@ const BACKOFF_ON_ERROR: Duration = Duration::from_secs(2);
 
 /// How long chat-orch waits for an immediate LLM reply before sending
 /// the "working..." message and switching to background delivery.
-const FAST_REPLY_TIMEOUT_MS: u64 = 5_000;
+const FAST_REPLY_TIMEOUT_MS: u64 = 30_000;
 
 /// How long the background task waits for the final reply after the
 /// "working..." message has been sent.
