@@ -13,6 +13,7 @@ pub mod session;
 pub mod sse;
 pub mod telegram;
 pub mod types;
+pub mod user_auth;
 
 pub use error::AppError;
 

@@ -76,6 +76,17 @@ async fn main() -> Result<()> {
     ) {
         let telegram = TelegramClient::new(http.clone(), &token);
         let ar_for_telegram = agent_runtime.clone().map(Arc::new);
+        let user_auth = config
+            .user_auth_url
+            .clone()
+            .map(|url| chat_orch::user_auth::UserAuthClient::new(http.clone(), url));
+        if user_auth.is_some() {
+            tracing::info!("telegram OTP pre-registration enabled (USER_AUTH_URL set)");
+        }
+        let tenant_slug = config
+            .telegram_default_tenant_slug
+            .clone()
+            .unwrap_or_else(|| "demo-hospital".to_string());
         TelegramLoop::new(
             telegram,
             llm.clone(),
@@ -83,7 +94,9 @@ async fn main() -> Result<()> {
             sessions.clone(),
             metricas.clone(),
             tenant_id,
+            tenant_slug,
             ar_for_telegram,
+            user_auth,
         )
         .spawn();
     } else {
