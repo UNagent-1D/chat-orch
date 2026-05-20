@@ -96,7 +96,8 @@ async fn main() -> Result<()> {
             tenant_id,
             tenant_slug,
             ar_for_telegram,
-            user_auth,
+            http.clone(),
+            config.conversation_chat_url.clone(),
         )
         .spawn();
     } else {
