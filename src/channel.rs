@@ -290,12 +290,13 @@ mod tests {
         let env = Envelope {
             v: 1,
             iv: IV_B64.into(),
-            // flip the last base64 char to break the ciphertext
+            // Flip the FIRST base64 char to corrupt the ciphertext while
+            // keeping the string a valid base64 sequence — otherwise we'd
+            // hit the base64-decode error path instead of AEAD verification.
             ct: {
-                let mut s = CIPHERTEXT_B64.to_string();
-                let last = s.pop().unwrap();
-                s.push(if last == 'A' { 'B' } else { 'A' });
-                s
+                let mut chars: Vec<char> = CIPHERTEXT_B64.chars().collect();
+                chars[0] = if chars[0] == 'A' { 'B' } else { 'A' };
+                chars.into_iter().collect()
             },
             tag: TAG_B64.into(),
         };
