@@ -129,7 +129,7 @@ pub async fn run_turn(
 }
 
 async fn execute_tool(hospital: &HospitalClient, call: &ToolCall) -> (String, bool) {
-    let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| Value::Null);
+    let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
     match hospital.call_tool(&call.function.name, &args).await {
         Ok(val) => {
             let booked = call.function.name == "book_appointment"

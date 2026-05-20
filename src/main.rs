@@ -139,8 +139,7 @@ async fn main() -> Result<()> {
 }
 
 fn init_tracing(rust_log: &str, log_format: &str) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(rust_log));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(rust_log));
 
     let registry = tracing_subscriber::registry().with(filter);
     if log_format.eq_ignore_ascii_case("json") {
@@ -152,9 +151,7 @@ fn init_tracing(rust_log: &str, log_format: &str) {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("install Ctrl+C handler");
+        signal::ctrl_c().await.expect("install Ctrl+C handler");
     };
 
     #[cfg(unix)]
