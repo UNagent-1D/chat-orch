@@ -16,7 +16,7 @@ use crate::AppState;
 pub fn build_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE]);
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
     let cors = match state.config.cors_allow_origin.parse::<HeaderValue>() {
         Ok(origin) => cors.allow_origin(origin),
