@@ -41,6 +41,7 @@ impl HospitalClient {
             "book_appointment" => self.book_appointment(args).await,
             "cancel_appointment" => self.cancel_appointment(args).await,
             "get_patient_appointments" => self.get_patient_appointments(args).await,
+            "reschedule_appointment" => self.reschedule_appointment(args).await,
             other => Err(AppError::BadRequest(format!("unknown tool: {other}"))),
         }
     }
@@ -83,6 +84,29 @@ impl HospitalClient {
         });
         self.send_post(&self.url(&format!("/appointments/{appt_id}/cancel")), &body)
             .await
+    }
+
+    async fn reschedule_appointment(&self, args: &Value) -> Result<Value, AppError> {
+        let appt_id = args
+            .get("appointment_id")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| AppError::BadRequest("appointment_id is required".into()))?;
+        let new_slot = args
+            .get("new_slot_start")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| AppError::BadRequest("new_slot_start is required".into()))?;
+        let mut body = json!({ "new_slot_start": new_slot });
+        if let Some(v) = args.get("new_doctor_id").and_then(|x| x.as_str()) {
+            body["new_doctor_id"] = json!(v);
+        }
+        if let Some(v) = args.get("reason").and_then(|x| x.as_str()) {
+            body["reason"] = json!(v);
+        }
+        self.send_post(
+            &self.url(&format!("/appointments/{appt_id}/reschedule")),
+            &body,
+        )
+        .await
     }
 
     async fn get_patient_appointments(&self, args: &Value) -> Result<Value, AppError> {
@@ -206,6 +230,20 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                     "reason":         {"type": "string"}
                 },
                 "required": ["appointment_id"]
+            }),
+        },
+        ToolDef {
+            name: "reschedule_appointment".into(),
+            description: "Reagenda una cita confirmada: cancela la cita existente y crea una nueva con el mismo paciente en un nuevo horario (opcionalmente con otro médico). Verifica el conflicto del nuevo slot ANTES de cancelar, así que la cita original sobrevive si el nuevo horario está ocupado.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "appointment_id":  {"type": "string", "description": "ID de la cita actual a reagendar."},
+                    "new_slot_start":  {"type": "string", "description": "Nuevo horario en ISO 8601, p.ej. '2026-03-15T11:00:00'."},
+                    "new_doctor_id":   {"type": "string", "description": "Opcional: cambiar de médico al reagendar."},
+                    "reason":          {"type": "string", "description": "Motivo del cambio (opcional)."}
+                },
+                "required": ["appointment_id", "new_slot_start"]
             }),
         },
         ToolDef {

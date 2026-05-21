@@ -5,11 +5,14 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use crate::gateway::{ConversationChatClient, MetricasClient, TelegramClient, TelegramUpdate};
+use crate::gateway::{
+    ConversationChatClient, MetricasClient, TelegramClient, TelegramMessage, TelegramUpdate,
+};
 use crate::hospital::HospitalClient;
 use crate::llm::LlmClient;
 use crate::runtime::run_turn;
 use crate::session::SessionStore;
+use crate::user_auth::{CreateUserBody, UserAuthClient};
 
 const POLL_TIMEOUT_SECS: u64 = 30;
 const BACKOFF_ON_ERROR: Duration = Duration::from_secs(2);
@@ -27,7 +30,14 @@ const WORKING_MESSAGE: &str =
 
 /// Reply to the /start (or /reset) command. Clearing the chat's cached
 /// session means the next message opens a fresh conversation.
-const START_MESSAGE: &str = "Hola, ¿en qué puedo ayudarte hoy?";
+// Welcome shown on /start AND on the first message from an unknown chat_id
+// (when no auth_state exists yet). Includes a clinic presentation so the
+// user knows where they landed before being asked for their email.
+const START_MESSAGE: &str = "👋 Hola, somos la Clínica San Ignacio. Te damos la bienvenida a nuestro asistente de agendamiento.\n\nPara empezar, por favor proporciónanos tu correo electrónico.";
+
+// Three strikes on the OTP code and the session is closed. The user must
+// /start over to try again, which clears the attempt counter.
+const MAX_OTP_ATTEMPTS: u32 = 3;
 
 /// How often the outbound loop polls conversation-chat for operator
 /// messages waiting to be delivered to Telegram users.
@@ -42,6 +52,19 @@ const OUTBOUND_POLL_INTERVAL: Duration = Duration::from_secs(2);
 ///
 /// When `agent_runtime` is None, the original synchronous `run_turn()` path
 /// is used as a fallback.
+/// Per-chat authentication state for the OTP pre-registration flow.
+/// When `user_auth` is set on TelegramLoop, every incoming message is
+/// gated by this state machine before reaching the LLM.
+#[derive(Debug, Clone)]
+enum AuthState {
+    /// First contact OR explicit reset. Bot prompts for email next.
+    AwaitingEmail,
+    /// Bot has emailed the OTP, waiting for the user to type 6 digits.
+    AwaitingOtp,
+    /// OTP verified, session JWT obtained. Pass-through to the LLM.
+    Authenticated,
+}
+
 pub struct TelegramLoop {
     telegram: TelegramClient,
     llm: Arc<LlmClient>,
@@ -49,10 +72,20 @@ pub struct TelegramLoop {
     sessions: Arc<SessionStore>,
     metricas: Option<MetricasClient>,
     default_tenant_id: String,
+    default_tenant_slug: String,
     chat_sessions: Arc<Mutex<HashMap<i64, String>>>,
     agent_runtime: Option<Arc<ConversationChatClient>>,
     http: reqwest::Client,
     conversation_chat_url: String,
+    user_auth: Option<UserAuthClient>,
+    auth_states: Arc<Mutex<HashMap<i64, AuthState>>>,
+    // Failed OTP verify attempts per chat_id. Reset on success, /start, /reset,
+    // and when the session is locked out (after MAX_OTP_ATTEMPTS).
+    otp_attempts: Arc<Mutex<HashMap<i64, u32>>>,
+    // Email captured during the OTP exchange, indexed by chat_id. Used
+    // when creating the conversation-chat session so post-booking hooks
+    // can fire confirmation emails without re-querying User-Auth.
+    verified_emails: Arc<Mutex<HashMap<i64, String>>>,
 }
 
 impl TelegramLoop {
@@ -64,9 +97,11 @@ impl TelegramLoop {
         sessions: Arc<SessionStore>,
         metricas: Option<MetricasClient>,
         default_tenant_id: String,
+        default_tenant_slug: String,
         agent_runtime: Option<Arc<ConversationChatClient>>,
         http: reqwest::Client,
         conversation_chat_url: String,
+        user_auth: Option<UserAuthClient>,
     ) -> Self {
         Self {
             telegram,
@@ -75,10 +110,15 @@ impl TelegramLoop {
             sessions,
             metricas,
             default_tenant_id,
+            default_tenant_slug,
             chat_sessions: Arc::new(Mutex::new(HashMap::new())),
             agent_runtime,
             http,
             conversation_chat_url,
+            user_auth,
+            auth_states: Arc::new(Mutex::new(HashMap::new())),
+            otp_attempts: Arc::new(Mutex::new(HashMap::new())),
+            verified_emails: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -128,17 +168,28 @@ impl TelegramLoop {
     async fn handle_update(&self, update: TelegramUpdate) -> Result<(), crate::error::AppError> {
         let Some(msg) = update.message else { return Ok(()); };
         let chat_id = msg.chat.id;
-        let Some(text) = msg.text else { return Ok(()); };
+        let Some(text) = msg.text.clone() else { return Ok(()); };
         if text.trim().is_empty() {
             return Ok(());
         }
 
-        // /start and /reset drop the cached session so the next message
-        // opens a fresh conversation instead of reusing a stale one.
+        // /start and /reset drop the cached session AND the auth state so
+        // the next message opens a fresh conversation + OTP cycle.
         let trimmed = text.trim();
         if trimmed == "/start" || trimmed == "/reset" {
             self.chat_sessions.lock().await.remove(&chat_id);
+            self.auth_states.lock().await.remove(&chat_id);
+            self.otp_attempts.lock().await.remove(&chat_id);
+            self.verified_emails.lock().await.remove(&chat_id);
             self.telegram.send_message(chat_id, START_MESSAGE).await?;
+            return Ok(());
+        }
+
+        // OTP pre-registration gate. When USER_AUTH_URL is set, every
+        // first-time chat_id has to provide an email + verify a 6-digit
+        // code before the LLM sees the message. Returns true if the flow
+        // absorbed the message (response already sent to Telegram).
+        if self.run_pre_registration(&msg, &text).await? {
             return Ok(());
         }
 
@@ -146,6 +197,200 @@ impl TelegramLoop {
             self.handle_update_async(ar.clone(), chat_id, text).await
         } else {
             self.handle_update_sync(chat_id, &text).await
+        }
+    }
+
+    /// Pre-registration state machine. Returns:
+    /// - Ok(true)  → message was absorbed by the flow; do not invoke the LLM.
+    /// - Ok(false) → user is already Authenticated; fall through to LLM.
+    async fn run_pre_registration(
+        &self,
+        msg: &TelegramMessage,
+        text: &str,
+    ) -> Result<bool, crate::error::AppError> {
+        let chat_id = msg.chat.id;
+        let ua = match &self.user_auth {
+            Some(c) => c,
+            None => return Ok(false),
+        };
+
+        let state = {
+            let guard = self.auth_states.lock().await;
+            guard.get(&chat_id).cloned()
+        };
+
+        match state {
+            Some(AuthState::Authenticated) => Ok(false),
+
+            Some(AuthState::AwaitingOtp) => {
+                let code = text.trim();
+                let is_six_digits = code.len() == 6 && code.chars().all(|c| c.is_ascii_digit());
+                if !is_six_digits {
+                    if code.eq_ignore_ascii_case("correo") || code.eq_ignore_ascii_case("email") {
+                        // Resend code to the same document (chat_id).
+                        let doc = chat_id.to_string();
+                        match ua.request_code(&doc).await {
+                            Ok(()) => {
+                                self.telegram
+                                    .send_message(chat_id, "Te reenvié el código.")
+                                    .await?;
+                            }
+                            Err(e) => {
+                                tracing::warn!(error=%e, "request-code resend failed");
+                                self.telegram
+                                    .send_message(chat_id, "No pude reenviar el código.")
+                                    .await?;
+                            }
+                        }
+                    } else {
+                        self.telegram
+                            .send_message(
+                                chat_id,
+                                "Espero un código de 6 dígitos. Escribe \"correo\" si quieres que te lo reenvíe.",
+                            )
+                            .await?;
+                    }
+                    return Ok(true);
+                }
+
+                let doc = chat_id.to_string();
+                match ua.verify_code(&doc, code).await {
+                    Ok(_) => {
+                        self.auth_states
+                            .lock()
+                            .await
+                            .insert(chat_id, AuthState::Authenticated);
+                        // Successful verification resets the strike count
+                        // so a future re-auth starts fresh.
+                        self.otp_attempts.lock().await.remove(&chat_id);
+                        self.telegram
+                            .send_message(
+                                chat_id,
+                                "¡Listo! Cuéntame en qué puedo ayudarte.",
+                            )
+                            .await?;
+                    }
+                    Err(e) => {
+                        tracing::info!(error=%e, "verify-code failed");
+                        // Bump the strike count. After MAX_OTP_ATTEMPTS, drop
+                        // all session state so the next message starts a fresh
+                        // /start cycle.
+                        let attempts = {
+                            let mut g = self.otp_attempts.lock().await;
+                            let n = g.get(&chat_id).copied().unwrap_or(0) + 1;
+                            g.insert(chat_id, n);
+                            n
+                        };
+                        if attempts >= MAX_OTP_ATTEMPTS {
+                            self.auth_states.lock().await.remove(&chat_id);
+                            self.chat_sessions.lock().await.remove(&chat_id);
+                            self.otp_attempts.lock().await.remove(&chat_id);
+                            self.verified_emails.lock().await.remove(&chat_id);
+                            self.telegram
+                                .send_message(
+                                    chat_id,
+                                    "Has alcanzado el máximo de intentos. Por seguridad cerramos esta sesión. Escribe /start cuando quieras intentarlo de nuevo. ¡Hasta pronto!",
+                                )
+                                .await?;
+                        } else {
+                            let remaining = MAX_OTP_ATTEMPTS - attempts;
+                            let msg = format!(
+                                "Código inválido o expirado. Te quedan {remaining} intento(s). Intenta otro, o escribe \"correo\" para reenviarlo."
+                            );
+                            self.telegram.send_message(chat_id, &msg).await?;
+                        }
+                    }
+                }
+                Ok(true)
+            }
+
+            // None (first contact) or Some(AwaitingEmail) (still missing email).
+            _ => {
+                if !looks_like_email(text) {
+                    // First contact: full welcome + clinic presentation.
+                    // Re-prompt: shorter nudge so we don't spam the welcome.
+                    let is_first_contact = state.is_none();
+                    self.auth_states
+                        .lock()
+                        .await
+                        .insert(chat_id, AuthState::AwaitingEmail);
+                    let prompt = if is_first_contact {
+                        START_MESSAGE
+                    } else {
+                        "Eso no parece un correo electrónico válido. ¿Puedes escribirlo de nuevo?"
+                    };
+                    self.telegram.send_message(chat_id, prompt).await?;
+                    return Ok(true);
+                }
+
+                let doc = chat_id.to_string();
+                let first_name = msg.chat.first_name.clone().unwrap_or_default();
+                let last_name = msg.chat.last_name.clone().unwrap_or_default();
+                let display_first = if first_name.is_empty() {
+                    "Usuario"
+                } else {
+                    first_name.as_str()
+                };
+                let display_last = if last_name.is_empty() {
+                    "Telegram"
+                } else {
+                    last_name.as_str()
+                };
+
+                // Create user (idempotent on conflict).
+                if let Err(e) = ua
+                    .create_user(&CreateUserBody {
+                        tenant_id: &self.default_tenant_id,
+                        tenant_slug: &self.default_tenant_slug,
+                        user_name: display_first,
+                        user_last_name: display_last,
+                        user_document: &doc,
+                        user_email: text,
+                    })
+                    .await
+                {
+                    tracing::warn!(error=%e, "user-auth create_user failed");
+                    self.telegram
+                        .send_message(
+                            chat_id,
+                            "Hubo un problema registrando tu correo. Intenta de nuevo en un momento.",
+                        )
+                        .await?;
+                    return Ok(true);
+                }
+
+                if let Err(e) = ua.request_code(&doc).await {
+                    tracing::warn!(error=%e, "user-auth request-code failed");
+                    self.telegram
+                        .send_message(
+                            chat_id,
+                            "Te registramos, pero no pudimos enviar el código. Intenta de nuevo en un momento.",
+                        )
+                        .await?;
+                    return Ok(true);
+                }
+
+                // Stash the email NOW so a successful OTP verify can
+                // ship it through session creation without a re-prompt.
+                // If the OTP later fails 3x, the lockout branch wipes
+                // this entry alongside the auth state.
+                self.verified_emails
+                    .lock()
+                    .await
+                    .insert(chat_id, text.to_string());
+
+                self.auth_states
+                    .lock()
+                    .await
+                    .insert(chat_id, AuthState::AwaitingOtp);
+                self.telegram
+                    .send_message(
+                        chat_id,
+                        "Te envié un código de 6 dígitos a tu correo. Pégalo aquí. (Caduca en 5 minutos.)",
+                    )
+                    .await?;
+                Ok(true)
+            }
         }
     }
 
@@ -161,12 +406,17 @@ impl TelegramLoop {
         }
 
         // Get or create a conversation-chat session for this chat_id.
+        // If OTP verified, ship the user's email through so
+        // conversation-chat can fire booking confirmations.
+        let contact_email = self.verified_emails.lock().await.get(&chat_id).cloned();
         let session_id = {
             let mut guard = self.chat_sessions.lock().await;
             if let Some(sid) = guard.get(&chat_id) {
                 sid.clone()
             } else {
-                let sid = ar.create_session(&self.default_tenant_id).await?;
+                let sid = ar
+                    .create_session(&self.default_tenant_id, contact_email.as_deref())
+                    .await?;
                 guard.insert(chat_id, sid.clone());
                 sid
             }
@@ -255,6 +505,33 @@ impl TelegramLoop {
         }
         Ok(())
     }
+}
+
+/// Loose RFC-5322 heuristic — good enough to distinguish "an email" from
+/// a 6-digit OTP code or free-form chat. We only need this before we hand
+/// the value off to User-Auth, which does its own validation.
+fn looks_like_email(text: &str) -> bool {
+    let s = text.trim();
+    if s.len() < 5 || s.len() > 254 {
+        return false;
+    }
+    let mut at_count = 0;
+    let mut has_dot_after_at = false;
+    let mut seen_at = false;
+    for c in s.chars() {
+        if c == '@' {
+            at_count += 1;
+            seen_at = true;
+            continue;
+        }
+        if seen_at && c == '.' {
+            has_dot_after_at = true;
+        }
+        if c.is_whitespace() {
+            return false;
+        }
+    }
+    at_count == 1 && has_dot_after_at
 }
 
 #[derive(Deserialize)]

@@ -41,6 +41,10 @@ pub struct TelegramMessage {
 #[derive(Debug, Deserialize)]
 pub struct TelegramChat {
     pub id: i64,
+    #[serde(default)]
+    pub first_name: Option<String>,
+    #[serde(default)]
+    pub last_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,6 +233,8 @@ impl MetricasClient {
 #[derive(Serialize)]
 struct CreateSessionBody<'a> {
     tenant_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contact_email: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -268,12 +274,20 @@ impl ConversationChatClient {
         }
     }
 
-    pub async fn create_session(&self, tenant_id: &str) -> Result<String, AppError> {
+    pub async fn create_session(
+        &self,
+        tenant_id: &str,
+        contact_email: Option<&str>,
+    ) -> Result<String, AppError> {
         let url = format!("{}/api/v1/sessions", self.base_url.trim_end_matches('/'));
         let req = self.http.post(&url).bearer_auth("internal");
-        let req = self
-            .channel
-            .apply_request(req, &CreateSessionBody { tenant_id })?;
+        let req = self.channel.apply_request(
+            req,
+            &CreateSessionBody {
+                tenant_id,
+                contact_email,
+            },
+        )?;
         let response = req.send().await?;
         let parsed: CreateSessionResponse = self.channel.decode_response(response).await?;
         Ok(parsed.sid)

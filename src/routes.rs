@@ -99,7 +99,11 @@ async fn chat_forward(
     let (sid, reply_text) = if let Some(ar) = &state.agent_runtime {
         let sid = match session_id.filter(|s| !s.trim().is_empty()) {
             Some(id) => id,
-            None => ar.create_session(&req.tenant_id).await?,
+            // HTTP /v1/chat has no OTP gate (browser auth handles it),
+            // so we don't know the user's email here. The session is
+            // created without one; conversation-chat's email hook
+            // becomes a no-op for this channel.
+            None => ar.create_session(&req.tenant_id, None).await?,
         };
         let resp = ar.post_turn(&sid, &req.message).await?;
         let text = resp["message"]["text"].as_str().unwrap_or("").to_string();
