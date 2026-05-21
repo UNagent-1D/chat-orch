@@ -98,6 +98,7 @@ async fn main() -> Result<()> {
             ar_for_telegram,
             http.clone(),
             config.conversation_chat_url.clone(),
+            user_auth,
         )
         .spawn();
     } else {

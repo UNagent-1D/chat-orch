@@ -30,7 +30,14 @@ const WORKING_MESSAGE: &str =
 
 /// Reply to the /start (or /reset) command. Clearing the chat's cached
 /// session means the next message opens a fresh conversation.
-const START_MESSAGE: &str = "Hola, ¿en qué puedo ayudarte hoy?";
+// Welcome shown on /start AND on the first message from an unknown chat_id
+// (when no auth_state exists yet). Includes a clinic presentation so the
+// user knows where they landed before being asked for their email.
+const START_MESSAGE: &str = "👋 Hola, somos la Clínica San Ignacio. Te damos la bienvenida a nuestro asistente de agendamiento.\n\nPara empezar, por favor proporciónanos tu correo electrónico.";
+
+// Three strikes on the OTP code and the session is closed. The user must
+// /start over to try again, which clears the attempt counter.
+const MAX_OTP_ATTEMPTS: u32 = 3;
 
 /// How often the outbound loop polls conversation-chat for operator
 /// messages waiting to be delivered to Telegram users.
@@ -70,6 +77,15 @@ pub struct TelegramLoop {
     agent_runtime: Option<Arc<ConversationChatClient>>,
     http: reqwest::Client,
     conversation_chat_url: String,
+    user_auth: Option<UserAuthClient>,
+    auth_states: Arc<Mutex<HashMap<i64, AuthState>>>,
+    // Failed OTP verify attempts per chat_id. Reset on success, /start, /reset,
+    // and when the session is locked out (after MAX_OTP_ATTEMPTS).
+    otp_attempts: Arc<Mutex<HashMap<i64, u32>>>,
+    // Email captured during the OTP exchange, indexed by chat_id. Used
+    // when creating the conversation-chat session so post-booking hooks
+    // can fire confirmation emails without re-querying User-Auth.
+    verified_emails: Arc<Mutex<HashMap<i64, String>>>,
 }
 
 impl TelegramLoop {
@@ -85,6 +101,7 @@ impl TelegramLoop {
         agent_runtime: Option<Arc<ConversationChatClient>>,
         http: reqwest::Client,
         conversation_chat_url: String,
+        user_auth: Option<UserAuthClient>,
     ) -> Self {
         Self {
             telegram,
@@ -98,6 +115,10 @@ impl TelegramLoop {
             agent_runtime,
             http,
             conversation_chat_url,
+            user_auth,
+            auth_states: Arc::new(Mutex::new(HashMap::new())),
+            otp_attempts: Arc::new(Mutex::new(HashMap::new())),
+            verified_emails: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -147,17 +168,28 @@ impl TelegramLoop {
     async fn handle_update(&self, update: TelegramUpdate) -> Result<(), crate::error::AppError> {
         let Some(msg) = update.message else { return Ok(()); };
         let chat_id = msg.chat.id;
-        let Some(text) = msg.text else { return Ok(()); };
+        let Some(text) = msg.text.clone() else { return Ok(()); };
         if text.trim().is_empty() {
             return Ok(());
         }
 
-        // /start and /reset drop the cached session so the next message
-        // opens a fresh conversation instead of reusing a stale one.
+        // /start and /reset drop the cached session AND the auth state so
+        // the next message opens a fresh conversation + OTP cycle.
         let trimmed = text.trim();
         if trimmed == "/start" || trimmed == "/reset" {
             self.chat_sessions.lock().await.remove(&chat_id);
+            self.auth_states.lock().await.remove(&chat_id);
+            self.otp_attempts.lock().await.remove(&chat_id);
+            self.verified_emails.lock().await.remove(&chat_id);
             self.telegram.send_message(chat_id, START_MESSAGE).await?;
+            return Ok(());
+        }
+
+        // OTP pre-registration gate. When USER_AUTH_URL is set, every
+        // first-time chat_id has to provide an email + verify a 6-digit
+        // code before the LLM sees the message. Returns true if the flow
+        // absorbed the message (response already sent to Telegram).
+        if self.run_pre_registration(&msg, &text).await? {
             return Ok(());
         }
 
@@ -228,6 +260,9 @@ impl TelegramLoop {
                             .lock()
                             .await
                             .insert(chat_id, AuthState::Authenticated);
+                        // Successful verification resets the strike count
+                        // so a future re-auth starts fresh.
+                        self.otp_attempts.lock().await.remove(&chat_id);
                         self.telegram
                             .send_message(
                                 chat_id,
@@ -237,30 +272,54 @@ impl TelegramLoop {
                     }
                     Err(e) => {
                         tracing::info!(error=%e, "verify-code failed");
-                        self.telegram
-                            .send_message(
-                                chat_id,
-                                "Código inválido o expirado. Intenta otro, o escribe \"correo\" para reenviarlo.",
-                            )
-                            .await?;
+                        // Bump the strike count. After MAX_OTP_ATTEMPTS, drop
+                        // all session state so the next message starts a fresh
+                        // /start cycle.
+                        let attempts = {
+                            let mut g = self.otp_attempts.lock().await;
+                            let n = g.get(&chat_id).copied().unwrap_or(0) + 1;
+                            g.insert(chat_id, n);
+                            n
+                        };
+                        if attempts >= MAX_OTP_ATTEMPTS {
+                            self.auth_states.lock().await.remove(&chat_id);
+                            self.chat_sessions.lock().await.remove(&chat_id);
+                            self.otp_attempts.lock().await.remove(&chat_id);
+                            self.verified_emails.lock().await.remove(&chat_id);
+                            self.telegram
+                                .send_message(
+                                    chat_id,
+                                    "Has alcanzado el máximo de intentos. Por seguridad cerramos esta sesión. Escribe /start cuando quieras intentarlo de nuevo. ¡Hasta pronto!",
+                                )
+                                .await?;
+                        } else {
+                            let remaining = MAX_OTP_ATTEMPTS - attempts;
+                            let msg = format!(
+                                "Código inválido o expirado. Te quedan {remaining} intento(s). Intenta otro, o escribe \"correo\" para reenviarlo."
+                            );
+                            self.telegram.send_message(chat_id, &msg).await?;
+                        }
                     }
                 }
                 Ok(true)
             }
 
-            // None or Some(AwaitingEmail) → expect email-shaped text.
+            // None (first contact) or Some(AwaitingEmail) (still missing email).
             _ => {
                 if !looks_like_email(text) {
+                    // First contact: full welcome + clinic presentation.
+                    // Re-prompt: shorter nudge so we don't spam the welcome.
+                    let is_first_contact = state.is_none();
                     self.auth_states
                         .lock()
                         .await
                         .insert(chat_id, AuthState::AwaitingEmail);
-                    self.telegram
-                        .send_message(
-                            chat_id,
-                            "¡Hola! Antes de empezar, ¿cuál es tu correo electrónico?",
-                        )
-                        .await?;
+                    let prompt = if is_first_contact {
+                        START_MESSAGE
+                    } else {
+                        "Eso no parece un correo electrónico válido. ¿Puedes escribirlo de nuevo?"
+                    };
+                    self.telegram.send_message(chat_id, prompt).await?;
                     return Ok(true);
                 }
 
@@ -311,6 +370,15 @@ impl TelegramLoop {
                     return Ok(true);
                 }
 
+                // Stash the email NOW so a successful OTP verify can
+                // ship it through session creation without a re-prompt.
+                // If the OTP later fails 3x, the lockout branch wipes
+                // this entry alongside the auth state.
+                self.verified_emails
+                    .lock()
+                    .await
+                    .insert(chat_id, text.to_string());
+
                 self.auth_states
                     .lock()
                     .await
@@ -338,12 +406,17 @@ impl TelegramLoop {
         }
 
         // Get or create a conversation-chat session for this chat_id.
+        // If OTP verified, ship the user's email through so
+        // conversation-chat can fire booking confirmations.
+        let contact_email = self.verified_emails.lock().await.get(&chat_id).cloned();
         let session_id = {
             let mut guard = self.chat_sessions.lock().await;
             if let Some(sid) = guard.get(&chat_id) {
                 sid.clone()
             } else {
-                let sid = ar.create_session(&self.default_tenant_id).await?;
+                let sid = ar
+                    .create_session(&self.default_tenant_id, contact_email.as_deref())
+                    .await?;
                 guard.insert(chat_id, sid.clone());
                 sid
             }
@@ -432,6 +505,33 @@ impl TelegramLoop {
         }
         Ok(())
     }
+}
+
+/// Loose RFC-5322 heuristic — good enough to distinguish "an email" from
+/// a 6-digit OTP code or free-form chat. We only need this before we hand
+/// the value off to User-Auth, which does its own validation.
+fn looks_like_email(text: &str) -> bool {
+    let s = text.trim();
+    if s.len() < 5 || s.len() > 254 {
+        return false;
+    }
+    let mut at_count = 0;
+    let mut has_dot_after_at = false;
+    let mut seen_at = false;
+    for c in s.chars() {
+        if c == '@' {
+            at_count += 1;
+            seen_at = true;
+            continue;
+        }
+        if seen_at && c == '.' {
+            has_dot_after_at = true;
+        }
+        if c.is_whitespace() {
+            return false;
+        }
+    }
+    at_count == 1 && has_dot_after_at
 }
 
 #[derive(Deserialize)]
