@@ -8,8 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
+COPY chat-orch/Cargo.toml chat-orch/Cargo.lock ./
+COPY chat-orch/src ./src
 
 RUN cargo build --release --bin chat-orch
 
