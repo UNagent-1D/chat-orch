@@ -29,6 +29,9 @@ pub struct TelegramUpdate {
     pub update_id: i64,
     #[serde(default)]
     pub message: Option<TelegramMessage>,
+    /// Inline-keyboard button presses (e.g. CSAT star ratings).
+    #[serde(default)]
+    pub callback_query: Option<TelegramCallbackQuery>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +50,26 @@ pub struct TelegramChat {
     pub last_name: Option<String>,
 }
 
+/// Incoming callback_query: fired when the user presses an inline-keyboard button.
+#[derive(Debug, Deserialize)]
+pub struct TelegramCallbackQuery {
+    /// Unique identifier for the query — must be acknowledged via answerCallbackQuery.
+    pub id: String,
+    /// User who pressed the button.
+    pub from: TelegramUser,
+    /// The message that carried the inline keyboard, if available.
+    #[serde(default)]
+    pub message: Option<TelegramMessage>,
+    /// Payload set in the button's `callback_data` field.
+    #[serde(default)]
+    pub data: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TelegramUser {
+    pub id: i64,
+}
+
 #[derive(Debug, Deserialize)]
 struct GetUpdatesResponse {
     ok: bool,
@@ -60,6 +83,33 @@ struct GetUpdatesResponse {
 struct SendMessageBody<'a> {
     chat_id: i64,
     text: &'a str,
+}
+
+/// sendMessage body with an inline keyboard attached.
+#[derive(Serialize)]
+struct SendMessageWithKeyboardBody<'a> {
+    chat_id: i64,
+    text: &'a str,
+    reply_markup: InlineKeyboardMarkup,
+}
+
+#[derive(Serialize)]
+struct InlineKeyboardMarkup {
+    inline_keyboard: Vec<Vec<InlineKeyboardButton>>,
+}
+
+#[derive(Serialize)]
+struct InlineKeyboardButton {
+    text: String,
+    callback_data: String,
+}
+
+/// answerCallbackQuery body — required to dismiss the loading spinner in Telegram.
+#[derive(Serialize)]
+struct AnswerCallbackQueryBody<'a> {
+    callback_query_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a str>,
 }
 
 impl TelegramClient {
@@ -118,6 +168,74 @@ impl TelegramClient {
                 "telegram sendMessage {status}: {}",
                 body.chars().take(200).collect::<String>()
             )));
+        }
+        Ok(())
+    }
+
+    /// Sends a CSAT prompt with an inline keyboard of five star-rating buttons.
+    /// The callback_data for each button is `"csat:<score>"` (e.g. `"csat:3"`).
+    pub async fn send_csat_prompt(&self, chat_id: i64) -> Result<(), AppError> {
+        let url = format!("{}/sendMessage", self.base_url);
+        let body = SendMessageWithKeyboardBody {
+            chat_id,
+            text: "¿Cómo calificarías tu atención hoy? (1 = muy mala, 5 = excelente)",
+            reply_markup: InlineKeyboardMarkup {
+                inline_keyboard: vec![vec![
+                    InlineKeyboardButton {
+                        text: "⭐ 1".into(),
+                        callback_data: "csat:1".into(),
+                    },
+                    InlineKeyboardButton {
+                        text: "⭐⭐ 2".into(),
+                        callback_data: "csat:2".into(),
+                    },
+                    InlineKeyboardButton {
+                        text: "⭐⭐⭐ 3".into(),
+                        callback_data: "csat:3".into(),
+                    },
+                    InlineKeyboardButton {
+                        text: "⭐⭐⭐⭐ 4".into(),
+                        callback_data: "csat:4".into(),
+                    },
+                    InlineKeyboardButton {
+                        text: "⭐⭐⭐⭐⭐ 5".into(),
+                        callback_data: "csat:5".into(),
+                    },
+                ]],
+            },
+        };
+        let response = self.http.post(&url).json(&body).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                %status, body = %text.chars().take(200).collect::<String>(),
+                "telegram send_csat_prompt non-2xx"
+            );
+        }
+        Ok(())
+    }
+
+    /// Acknowledges an inline-keyboard button press, removing the loading spinner.
+    /// Must be called within 10 s of the callback_query arriving.
+    pub async fn answer_callback_query(
+        &self,
+        callback_query_id: &str,
+        text: Option<&str>,
+    ) -> Result<(), AppError> {
+        let url = format!("{}/answerCallbackQuery", self.base_url);
+        let body = AnswerCallbackQueryBody {
+            callback_query_id,
+            text,
+        };
+        let response = self.http.post(&url).json(&body).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                %status, body = %body_text.chars().take(200).collect::<String>(),
+                "telegram answerCallbackQuery non-2xx"
+            );
         }
         Ok(())
     }

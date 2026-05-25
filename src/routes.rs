@@ -184,3 +184,217 @@ async fn submit_feedback(
     }
     Ok(Json(serde_json::json!({ "status": "ok" })))
 }
+
+// ── Integration tests ────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    use crate::channel::Channel;
+    use crate::config::AppConfig;
+    use crate::hospital::HospitalClient;
+    use crate::llm::LlmClient;
+    use crate::rate_limit::{BucketConfig, Limiters, RateLimiter};
+    use crate::session::SessionStore;
+    use crate::sse::SseHub;
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            server_host: "127.0.0.1".into(),
+            server_port: 0,
+            conversation_chat_url: "http://localhost:0".into(),
+            tenant_service_url: "http://localhost:0".into(),
+            hospital_mock_url: "http://localhost:0".into(),
+            metricas_url: None,
+            telegram_bot_token: None,
+            telegram_default_tenant_id: None,
+            telegram_default_tenant_slug: None,
+            user_auth_url: None,
+            cors_allow_origin: "*".into(),
+            openai_api_key: "sk-test".into(),
+            openai_base_url: "http://localhost:0/v1".into(),
+            openai_default_model: "test-model".into(),
+            agent_runtime_url: None,
+            backend_channel_key: None,
+            backend_channel_enabled: false,
+            rust_log: "error".into(),
+            log_format: "pretty".into(),
+        }
+    }
+
+    fn build_state(limiters: Arc<Limiters>) -> AppState {
+        let http = reqwest::Client::new();
+        let channel = Channel::disabled();
+        AppState {
+            config: Arc::new(test_config()),
+            llm: Arc::new(LlmClient::new(
+                http.clone(),
+                "http://localhost:0/v1".into(),
+                "sk-test".into(),
+                "test-model".into(),
+            )),
+            hospital: Arc::new(HospitalClient::new(
+                http,
+                "http://localhost:0".into(),
+                channel,
+            )),
+            sessions: SessionStore::new(),
+            metricas: None,
+            agent_runtime: None,
+            hub: SseHub::new(),
+            limiters,
+        }
+    }
+
+    fn tight_limiters() -> Arc<Limiters> {
+        Arc::new(Limiters {
+            tenant_chat: RateLimiter::new(BucketConfig::new(2.0, 0.0001)),
+            tenant_feedback: RateLimiter::new(BucketConfig::new(2.0, 0.0001)),
+        })
+    }
+
+    async fn body_json(body: Body) -> serde_json::Value {
+        let bytes = body.collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn health_returns_ok() {
+        let state = build_state(tight_limiters());
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp.into_body()).await;
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn chat_rejects_empty_tenant_id() {
+        let state = build_state(tight_limiters());
+        let app = build_router(state);
+        let body = r#"{"tenant_id":"","message":"hello"}"#;
+        let resp = app
+            .oneshot(
+                Request::post("/v1/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn chat_rejects_empty_message() {
+        let state = build_state(tight_limiters());
+        let app = build_router(state);
+        let body = r#"{"tenant_id":"t1","message":""}"#;
+        let resp = app
+            .oneshot(
+                Request::post("/v1/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn chat_rate_limits_after_burst_exhausted() {
+        // Burst=2: first two succeed (or fail with 502 from dead LLM), third → 429.
+        let limiters = Arc::new(Limiters {
+            tenant_chat: RateLimiter::new(BucketConfig::new(2.0, 0.0001)),
+            tenant_feedback: RateLimiter::new(BucketConfig::new(100.0, 1.0)),
+        });
+        let router = build_router(build_state(limiters.clone()));
+
+        // Pre-exhaust the bucket outside the router to isolate the 429 path.
+        limiters.tenant_chat.check("tenant-ratelimit-test").unwrap();
+        limiters.tenant_chat.check("tenant-ratelimit-test").unwrap();
+        // Bucket is now empty; next request must be rejected.
+        let app = build_router(build_state(limiters));
+        let body = r#"{"tenant_id":"tenant-ratelimit-test","message":"hi"}"#;
+        let resp = app
+            .oneshot(
+                Request::post("/v1/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "exhausted bucket must yield 429"
+        );
+        let retry_after = resp
+            .headers()
+            .get("Retry-After")
+            .expect("429 must carry Retry-After header")
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .expect("Retry-After must be a number");
+        assert!(retry_after >= 1);
+    }
+
+    #[tokio::test]
+    async fn feedback_rejects_out_of_range_score() {
+        let state = build_state(tight_limiters());
+        let app = build_router(state);
+        for bad_score in [0u8, 6u8] {
+            let body = format!(r#"{{"tenant_id":"t1","score":{bad_score}}}"#);
+            let resp = build_router(build_state(tight_limiters()))
+                .oneshot(
+                    Request::post("/v1/feedback")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "score={bad_score} should be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn feedback_rate_limits_after_burst_exhausted() {
+        let limiters = Arc::new(Limiters {
+            tenant_chat: RateLimiter::new(BucketConfig::new(100.0, 1.0)),
+            tenant_feedback: RateLimiter::new(BucketConfig::new(2.0, 0.0001)),
+        });
+        limiters.tenant_feedback.check("t-fb").unwrap();
+        limiters.tenant_feedback.check("t-fb").unwrap();
+
+        let app = build_router(build_state(limiters));
+        let body = r#"{"tenant_id":"t-fb","score":4}"#;
+        let resp = app
+            .oneshot(
+                Request::post("/v1/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.headers().contains_key("Retry-After"));
+    }
+}

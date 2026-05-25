@@ -54,6 +54,7 @@ wiremock = "0.6"
 tokio-test = "0.4"
 criterion = { version = "0.5", features = ["async_tokio"] }
 http-body-util = "0.1"
+tower = { version = "0.4", features = ["util"] }
 
 # Bench target added in PR 8 (feat/08-docker-tests) when benches/throughput.rs lands.
 # [[bench]]

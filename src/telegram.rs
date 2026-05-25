@@ -6,10 +6,12 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::gateway::{
-    ConversationChatClient, MetricasClient, TelegramClient, TelegramMessage, TelegramUpdate,
+    ConversationChatClient, MetricasClient, TelegramCallbackQuery, TelegramClient, TelegramMessage,
+    TelegramUpdate,
 };
 use crate::hospital::HospitalClient;
 use crate::llm::LlmClient;
+use crate::rate_limit::Limiters;
 use crate::runtime::run_turn;
 use crate::session::SessionStore;
 use crate::user_auth::{CreateUserBody, UserAuthClient};
@@ -86,6 +88,10 @@ pub struct TelegramLoop {
     // when creating the conversation-chat session so post-booking hooks
     // can fire confirmation emails without re-querying User-Auth.
     verified_emails: Arc<Mutex<HashMap<i64, String>>>,
+    /// Shared rate-limiter used to enforce per-chat_id request throttling.
+    limiters: Arc<Limiters>,
+    /// chat_ids that have been shown a CSAT prompt and are awaiting a star rating.
+    csat_pending: Arc<Mutex<HashMap<i64, ()>>>,
 }
 
 impl TelegramLoop {
@@ -102,6 +108,7 @@ impl TelegramLoop {
         http: reqwest::Client,
         conversation_chat_url: String,
         user_auth: Option<UserAuthClient>,
+        limiters: Arc<Limiters>,
     ) -> Self {
         Self {
             telegram,
@@ -119,6 +126,8 @@ impl TelegramLoop {
             auth_states: Arc::new(Mutex::new(HashMap::new())),
             otp_attempts: Arc::new(Mutex::new(HashMap::new())),
             verified_emails: Arc::new(Mutex::new(HashMap::new())),
+            limiters,
+            csat_pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -166,6 +175,12 @@ impl TelegramLoop {
     }
 
     async fn handle_update(&self, update: TelegramUpdate) -> Result<(), crate::error::AppError> {
+        // Inline-keyboard button press (e.g. CSAT star rating) — handle before
+        // anything else since callback_query updates carry no `message` field.
+        if let Some(cq) = update.callback_query {
+            return self.handle_callback_query(cq).await;
+        }
+
         let Some(msg) = update.message else { return Ok(()); };
         let chat_id = msg.chat.id;
         let Some(text) = msg.text.clone() else { return Ok(()); };
@@ -173,15 +188,37 @@ impl TelegramLoop {
             return Ok(());
         }
 
-        // /start and /reset drop the cached session AND the auth state so
-        // the next message opens a fresh conversation + OTP cycle.
+        // /start and /reset: clear all state. If the user had an active
+        // session, show the CSAT prompt before welcoming them fresh.
         let trimmed = text.trim();
         if trimmed == "/start" || trimmed == "/reset" {
-            self.chat_sessions.lock().await.remove(&chat_id);
+            let had_session = self.chat_sessions.lock().await.remove(&chat_id).is_some();
             self.auth_states.lock().await.remove(&chat_id);
             self.otp_attempts.lock().await.remove(&chat_id);
             self.verified_emails.lock().await.remove(&chat_id);
-            self.telegram.send_message(chat_id, START_MESSAGE).await?;
+            self.csat_pending.lock().await.remove(&chat_id);
+            if had_session {
+                // Ask for feedback on the conversation that just ended.
+                self.csat_pending.lock().await.insert(chat_id, ());
+                self.telegram.send_csat_prompt(chat_id).await?;
+            } else {
+                self.telegram.send_message(chat_id, START_MESSAGE).await?;
+            }
+            return Ok(());
+        }
+
+        // Per-user rate limit: keyed by chat_id so each Telegram user gets
+        // their own token bucket, preventing any single user from flooding
+        // the LLM pipeline regardless of which tenant they belong to.
+        if let Err(retry_after) = self.limiters.tenant_chat.check(&chat_id.to_string()) {
+            let secs = retry_after.as_secs().max(1);
+            let notice = format!(
+                "Estás enviando mensajes muy rápido. Por favor espera {secs} segundo(s) antes de continuar."
+            );
+            self.telegram.send_message(chat_id, &notice).await?;
+            if let Some(m) = &self.metricas {
+                m.record_rate_limit(self.default_tenant_id.clone(), "telegram_chat", secs);
+            }
             return Ok(());
         }
 
@@ -198,6 +235,53 @@ impl TelegramLoop {
         } else {
             self.handle_update_sync(chat_id, &text).await
         }
+    }
+
+    /// Handles an inline-keyboard callback_query, specifically CSAT star ratings.
+    async fn handle_callback_query(
+        &self,
+        cq: TelegramCallbackQuery,
+    ) -> Result<(), crate::error::AppError> {
+        // Resolve chat_id: prefer message.chat.id (accurate for group chats),
+        // fall back to from.id (always the pressing user's private chat).
+        let chat_id = cq
+            .message
+            .as_ref()
+            .map(|m| m.chat.id)
+            .unwrap_or(cq.from.id);
+
+        let data = cq.data.as_deref().unwrap_or("");
+
+        if let Some(score_str) = data.strip_prefix("csat:") {
+            // Acknowledge immediately to clear the button-press spinner.
+            let _ = self.telegram.answer_callback_query(&cq.id, None).await;
+
+            // Ignore stale callbacks for sessions that were never marked CSAT-pending.
+            let was_pending = self.csat_pending.lock().await.remove(&chat_id).is_some();
+            if !was_pending {
+                return Ok(());
+            }
+
+            match score_str.parse::<u8>().ok().filter(|&s| (1..=5).contains(&s)) {
+                Some(score) => {
+                    if let Some(m) = &self.metricas {
+                        m.record_feedback(self.default_tenant_id.clone(), score);
+                    }
+                    self.telegram
+                        .send_message(chat_id, "¡Gracias por tu calificación! 😊")
+                        .await?;
+                }
+                None => {
+                    tracing::warn!(data = %data, "received malformed CSAT callback_data");
+                }
+            }
+
+            // After feedback, prompt the user to start a new conversation.
+            self.telegram
+                .send_message(chat_id, "Para iniciar una nueva consulta, escribe /start.")
+                .await?;
+        }
+        Ok(())
     }
 
     /// Pre-registration state machine. Returns:
@@ -503,6 +587,15 @@ impl TelegramLoop {
         if !reply.trim().is_empty() {
             self.telegram.send_message(chat_id, reply.as_str()).await?;
         }
+
+        // Booking confirmed → ask for CSAT immediately (sync path only;
+        // the async/broker path does not propagate `resolved` today).
+        if resolved {
+            self.csat_pending.lock().await.insert(chat_id, ());
+            if let Err(e) = self.telegram.send_csat_prompt(chat_id).await {
+                tracing::warn!(error=%e, "failed to send CSAT prompt after resolved turn");
+            }
+        }
         Ok(())
     }
 }
@@ -510,7 +603,7 @@ impl TelegramLoop {
 /// Loose RFC-5322 heuristic — good enough to distinguish "an email" from
 /// a 6-digit OTP code or free-form chat. We only need this before we hand
 /// the value off to User-Auth, which does its own validation.
-fn looks_like_email(text: &str) -> bool {
+pub(crate) fn looks_like_email(text: &str) -> bool {
     let s = text.trim();
     if s.len() < 5 || s.len() > 254 {
         return false;
@@ -518,6 +611,7 @@ fn looks_like_email(text: &str) -> bool {
     let mut at_count = 0;
     let mut has_dot_after_at = false;
     let mut seen_at = false;
+    let mut local_len = 0usize;
     for c in s.chars() {
         if c == '@' {
             at_count += 1;
@@ -530,8 +624,11 @@ fn looks_like_email(text: &str) -> bool {
         if c.is_whitespace() {
             return false;
         }
+        if !seen_at {
+            local_len += 1;
+        }
     }
-    at_count == 1 && has_dot_after_at
+    at_count == 1 && has_dot_after_at && local_len > 0
 }
 
 #[derive(Deserialize)]
@@ -598,5 +695,123 @@ async fn outbound_loop(
                 }
             }
         }
+    }
+}
+
+// ── Unit tests ───────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── looks_like_email ─────────────────────────────────────────────────────
+
+    #[test]
+    fn email_valid_cases() {
+        let valid = [
+            "user@example.com",
+            "user.name+tag@sub.domain.co",
+            "u@x.io",
+            "first.last@hospital.org",
+        ];
+        for addr in valid {
+            assert!(looks_like_email(addr), "{addr:?} should be recognised as email");
+        }
+    }
+
+    #[test]
+    fn email_invalid_cases() {
+        let invalid = [
+            "",
+            "123456",      // OTP code
+            "plaintext",   // single word
+            "no-at-sign",
+            "double@@sign.com",
+            "missing-dot@domain",
+            "spaces in@example.com",
+            "@nolocal.com",
+            "noDomain@",
+        ];
+        for s in invalid {
+            assert!(!looks_like_email(s), "{s:?} should NOT be recognised as email");
+        }
+    }
+
+    #[test]
+    fn email_otp_codes_are_not_emails() {
+        // Six-digit OTP codes must never be interpreted as emails — they would
+        // cause the bot to loop forever trying to register an OTP as an address.
+        for code in ["123456", "000000", "999999", "012345"] {
+            assert!(!looks_like_email(code), "OTP {code:?} must not look like an email");
+        }
+    }
+
+    // ── CSAT callback_data parsing ───────────────────────────────────────────
+
+    #[test]
+    fn csat_prefix_strips_correctly() {
+        for (data, expected) in [
+            ("csat:1", Some(1u8)),
+            ("csat:5", Some(5u8)),
+            ("csat:3", Some(3u8)),
+        ] {
+            let score = data
+                .strip_prefix("csat:")
+                .and_then(|s| s.parse::<u8>().ok())
+                .filter(|&s| (1..=5).contains(&s));
+            assert_eq!(score, expected, "data={data:?}");
+        }
+    }
+
+    #[test]
+    fn csat_out_of_range_rejected() {
+        for bad in ["csat:0", "csat:6", "csat:99"] {
+            let score = bad
+                .strip_prefix("csat:")
+                .and_then(|s| s.parse::<u8>().ok())
+                .filter(|&s| (1..=5).contains(&s));
+            assert!(score.is_none(), "{bad:?} should be filtered out");
+        }
+    }
+
+    #[test]
+    fn csat_malformed_data_rejected() {
+        for bad in ["", "nope", "csat:", "csat:abc", "rating:3"] {
+            let score = bad
+                .strip_prefix("csat:")
+                .and_then(|s| s.parse::<u8>().ok())
+                .filter(|&s| (1..=5).contains(&s));
+            assert!(score.is_none(), "{bad:?} should produce None");
+        }
+    }
+
+    // ── Rate limit key isolation ─────────────────────────────────────────────
+
+    #[test]
+    fn telegram_rate_limit_keys_on_chat_id_not_tenant() {
+        // Each chat_id should exhaust independently; different chat_ids don't
+        // share quota. This mirrors what handle_update() does in production.
+        use crate::rate_limit::{BucketConfig, Limiters, RateLimiter};
+        use std::sync::Arc;
+
+        let limiters = Arc::new(Limiters {
+            tenant_chat: RateLimiter::new(BucketConfig::new(1.0, 0.0001)),
+            tenant_feedback: RateLimiter::new(BucketConfig::new(100.0, 1.0)),
+        });
+
+        let chat_a: i64 = 9_001;
+        let chat_b: i64 = 9_002;
+
+        // Exhaust chat_a
+        limiters.tenant_chat.check(&chat_a.to_string()).unwrap();
+        assert!(
+            limiters.tenant_chat.check(&chat_a.to_string()).is_err(),
+            "chat_a should be rate-limited"
+        );
+
+        // chat_b is unaffected
+        assert!(
+            limiters.tenant_chat.check(&chat_b.to_string()).is_ok(),
+            "chat_b should still have quota"
+        );
     }
 }

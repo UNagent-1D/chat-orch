@@ -149,4 +149,84 @@ mod tests {
         assert!(limiter.check("a").is_err());
         assert!(limiter.check("b").is_ok());
     }
+
+    #[test]
+    fn error_returns_positive_retry_duration() {
+        let limiter = RateLimiter::new(BucketConfig::new(1.0, 0.5));
+        limiter.check("k").unwrap();
+        let wait = limiter.check("k").expect_err("should be rate limited");
+        assert!(wait.as_millis() > 0, "retry-after duration must be positive");
+        // With refill_per_sec=0.5 and 1 token missing, wait ≈ 2s.
+        assert!(
+            wait.as_secs() <= 3,
+            "retry-after should not be absurdly large"
+        );
+    }
+
+    #[test]
+    fn burst_capacity_enforced_exactly() {
+        let burst = 5.0;
+        let limiter = RateLimiter::new(BucketConfig::new(burst, 0.0001));
+        for i in 0..5 {
+            assert!(limiter.check("t").is_ok(), "attempt {i} should succeed");
+        }
+        assert!(limiter.check("t").is_err(), "6th attempt should fail");
+    }
+
+    #[test]
+    fn multiple_tenants_do_not_share_quota() {
+        let limiter = RateLimiter::new(BucketConfig::new(2.0, 0.0001));
+        let tenants = ["alice", "bob", "carol"];
+        for tenant in tenants {
+            assert!(limiter.check(tenant).is_ok(), "{tenant} first req");
+            assert!(limiter.check(tenant).is_ok(), "{tenant} second req");
+            assert!(limiter.check(tenant).is_err(), "{tenant} third req must fail");
+        }
+    }
+
+    #[test]
+    fn telegram_per_user_keying_uses_chat_id() {
+        // Regression: Telegram loop must key by chat_id (string), not tenant_id.
+        // This test verifies that two different chat_ids get independent buckets.
+        let limiter = RateLimiter::new(BucketConfig::new(1.0, 0.0001));
+        let chat_a = 111_111_i64.to_string();
+        let chat_b = 222_222_i64.to_string();
+        assert!(limiter.check(&chat_a).is_ok());
+        assert!(limiter.check(&chat_a).is_err(), "chat_a exhausted");
+        assert!(limiter.check(&chat_b).is_ok(), "chat_b unaffected");
+    }
+
+    #[test]
+    fn concurrent_checks_never_exceed_capacity() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let limiter = Arc::new(RateLimiter::new(BucketConfig::new(10.0, 0.0001)));
+        let handles: Vec<_> = (0..20)
+            .map(|_| {
+                let lim = Arc::clone(&limiter);
+                thread::spawn(move || lim.check("shared").is_ok())
+            })
+            .collect();
+        let successes: usize = handles
+            .into_iter()
+            .map(|h| h.join().unwrap() as usize)
+            .sum();
+        assert_eq!(successes, 10, "exactly burst-many requests should succeed");
+    }
+
+    #[test]
+    fn limiters_chat_and_feedback_are_independent() {
+        let settings = LimiterSettings {
+            chat_burst: 1.0,
+            chat_per_sec: 0.0001,
+            feedback_burst: 1.0,
+            feedback_per_sec: 0.0001,
+        };
+        let limiters = Limiters::from_settings(&settings);
+        limiters.tenant_chat.check("t").unwrap();
+        assert!(limiters.tenant_chat.check("t").is_err());
+        // feedback bucket for same key is independent
+        assert!(limiters.tenant_feedback.check("t").is_ok());
+    }
 }

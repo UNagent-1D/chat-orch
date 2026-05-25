@@ -70,6 +70,17 @@ async fn main() -> Result<()> {
         .clone()
         .map(|url| ConversationChatClient::new(http.clone(), url, channel.clone()));
 
+    // Build the rate limiters early so they can be shared with TelegramLoop.
+    let limiter_settings = LimiterSettings::from_env();
+    tracing::info!(
+        chat_burst = limiter_settings.chat_burst,
+        chat_per_sec = limiter_settings.chat_per_sec,
+        feedback_burst = limiter_settings.feedback_burst,
+        feedback_per_sec = limiter_settings.feedback_per_sec,
+        "rate limiter initialised"
+    );
+    let limiters = Arc::new(Limiters::from_settings(&limiter_settings));
+
     if let (Some(token), Some(tenant_id)) = (
         config.telegram_bot_token.clone(),
         config.telegram_default_tenant_id.clone(),
@@ -99,6 +110,7 @@ async fn main() -> Result<()> {
             http.clone(),
             config.conversation_chat_url.clone(),
             user_auth,
+            limiters.clone(),
         )
         .spawn();
     } else {
@@ -115,16 +127,6 @@ async fn main() -> Result<()> {
                 config.server_host, config.server_port
             )
         })?;
-
-    let limiter_settings = LimiterSettings::from_env();
-    tracing::info!(
-        chat_burst = limiter_settings.chat_burst,
-        chat_per_sec = limiter_settings.chat_per_sec,
-        feedback_burst = limiter_settings.feedback_burst,
-        feedback_per_sec = limiter_settings.feedback_per_sec,
-        "rate limiter initialised"
-    );
-    let limiters = Arc::new(Limiters::from_settings(&limiter_settings));
 
     let state = AppState {
         config: Arc::new(config),
