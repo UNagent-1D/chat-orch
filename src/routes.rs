@@ -72,6 +72,9 @@ async fn chat_forward(
     if req.message.trim().is_empty() {
         return Err(AppError::BadRequest("message is required".into()));
     }
+    if req.message.len() > 4096 {
+        return Err(AppError::BadRequest("message exceeds maximum length of 4096 characters".into()));
+    }
 
     if let Err(retry_after) = state.limiters.tenant_chat.check(&req.tenant_id) {
         let retry_secs = retry_after.as_secs().max(1);
@@ -299,6 +302,24 @@ mod tests {
         let state = build_state(tight_limiters());
         let app = build_router(state);
         let body = r#"{"tenant_id":"t1","message":""}"#;
+        let resp = app
+            .oneshot(
+                Request::post("/v1/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn chat_rejects_oversized_message() {
+        let state = build_state(tight_limiters());
+        let app = build_router(state);
+        let big_message = "x".repeat(4097);
+        let body = format!(r#"{{"tenant_id":"t1","message":"{}"}}"#, big_message);
         let resp = app
             .oneshot(
                 Request::post("/v1/chat")
