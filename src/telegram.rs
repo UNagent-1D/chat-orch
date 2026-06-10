@@ -79,6 +79,10 @@ pub struct TelegramLoop {
     conversation_chat_url: String,
     user_auth: Option<UserAuthClient>,
     auth_states: Arc<Mutex<HashMap<i64, AuthState>>>,
+    // Per-chat flood guard (token bucket keyed by chat_id) + a separate
+    // bucket throttling the "slow down" warning itself.
+    rate: crate::rate_limit::RateLimiter,
+    rate_warn: crate::rate_limit::RateLimiter,
     // Failed OTP verify attempts per chat_id. Reset on success, /start, /reset,
     // and when the session is locked out (after MAX_OTP_ATTEMPTS).
     otp_attempts: Arc<Mutex<HashMap<i64, u32>>>,
@@ -117,6 +121,12 @@ impl TelegramLoop {
             conversation_chat_url,
             user_auth,
             auth_states: Arc::new(Mutex::new(HashMap::new())),
+            rate: crate::rate_limit::RateLimiter::new(
+                crate::rate_limit::telegram_bucket_from_env(),
+            ),
+            rate_warn: crate::rate_limit::RateLimiter::new(
+                crate::rate_limit::telegram_warn_bucket(),
+            ),
             otp_attempts: Arc::new(Mutex::new(HashMap::new())),
             verified_emails: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -170,6 +180,23 @@ impl TelegramLoop {
         let chat_id = msg.chat.id;
         let Some(text) = msg.text.clone() else { return Ok(()); };
         if text.trim().is_empty() {
+            return Ok(());
+        }
+
+        // Flood guard: drop messages beyond the per-chat budget. Warn the
+        // sender at most once per warn window — every dropped message must
+        // NOT cost us a sendMessage, or the guard becomes an amplifier.
+        if self.rate.check(&chat_id.to_string()).is_err() {
+            if self.rate_warn.check(&chat_id.to_string()).is_ok() {
+                let _ = self
+                    .telegram
+                    .send_message(
+                        chat_id,
+                        "⏳ Estás enviando mensajes muy rápido. Espera unos segundos e intenta de nuevo.",
+                    )
+                    .await;
+            }
+            tracing::debug!(chat_id, "telegram message rate-limited");
             return Ok(());
         }
 

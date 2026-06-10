@@ -122,6 +122,21 @@ impl LimiterSettings {
     }
 }
 
+/// Per-chat flood guard for the Telegram ingress, keyed by `chat_id`.
+/// Burst 5 then 1 message every 2 s — humans never notice, scripts do.
+pub fn telegram_bucket_from_env() -> BucketConfig {
+    BucketConfig::new(
+        parse_env_f64("TELEGRAM_RATE_LIMIT_BURST", 5.0),
+        parse_env_f64("TELEGRAM_RATE_LIMIT_PER_SEC", 0.5),
+    )
+}
+
+/// Throttle for the "slow down" warning itself (one per chat every 30 s),
+/// so the guard can't be abused to make the bot spam its own warnings.
+pub fn telegram_warn_bucket() -> BucketConfig {
+    BucketConfig::new(1.0, 1.0 / 30.0)
+}
+
 fn parse_env_f64(key: &str, default: f64) -> f64 {
     std::env::var(key)
         .ok()
