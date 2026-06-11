@@ -16,6 +16,10 @@ pub struct MetricasClient {
     http: Client,
     base_url: String,
     channel: Channel,
+    // Compliance now requires X-Internal-Key on its write endpoints
+    // (/conversation/chat, /feedback/csat, /v1/event). Read once from env so
+    // call sites are unchanged; None when unset (dev / older Compliance).
+    internal_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -253,6 +257,9 @@ impl MetricasClient {
             http,
             base_url,
             channel,
+            internal_key: std::env::var("INTERNAL_API_KEY")
+                .ok()
+                .filter(|v| !v.is_empty()),
         }
     }
 
@@ -261,13 +268,17 @@ impl MetricasClient {
     pub fn record_turn(&self, tenant_id: String, message: String, resolved: bool) {
         let http = self.http.clone();
         let channel = self.channel.clone();
+        let internal_key = self.internal_key.clone();
         let url = format!("{}/conversation/chat", self.base_url.trim_end_matches('/'));
         tokio::spawn(async move {
             let body = MetricasChatBody {
                 message: &message,
                 resolved,
             };
-            let req = http.post(&url).header("X-Tenant-ID", &tenant_id);
+            let mut req = http.post(&url).header("X-Tenant-ID", &tenant_id);
+            if let Some(k) = &internal_key {
+                req = req.header("X-Internal-Key", k);
+            }
             let req = match channel.apply_request(req, &body) {
                 Ok(r) => r,
                 Err(err) => {
@@ -292,6 +303,7 @@ impl MetricasClient {
     pub fn record_rate_limit(&self, tenant_id: String, scope: &'static str, retry_after_secs: u64) {
         let http = self.http.clone();
         let channel = self.channel.clone();
+        let internal_key = self.internal_key.clone();
         let url = format!("{}/v1/event", self.base_url.trim_end_matches('/'));
         let body = serde_json::json!({
             "level": "WARN",
@@ -304,7 +316,10 @@ impl MetricasClient {
             }
         });
         tokio::spawn(async move {
-            let req = http.post(&url);
+            let mut req = http.post(&url);
+            if let Some(k) = &internal_key {
+                req = req.header("X-Internal-Key", k);
+            }
             let req = match channel.apply_request(req, &body) {
                 Ok(r) => r,
                 Err(err) => {
@@ -326,10 +341,14 @@ impl MetricasClient {
     pub fn record_feedback(&self, tenant_id: String, score: u8) {
         let http = self.http.clone();
         let channel = self.channel.clone();
+        let internal_key = self.internal_key.clone();
         let url = format!("{}/feedback/csat", self.base_url.trim_end_matches('/'));
         let body = serde_json::json!({ "score": score });
         tokio::spawn(async move {
-            let req = http.post(&url).header("X-Tenant-ID", &tenant_id);
+            let mut req = http.post(&url).header("X-Tenant-ID", &tenant_id);
+            if let Some(k) = &internal_key {
+                req = req.header("X-Internal-Key", k);
+            }
             let req = match channel.apply_request(req, &body) {
                 Ok(r) => r,
                 Err(err) => {
